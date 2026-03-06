@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { getSupabaseConfig } from "@/lib/api";
-import { getLocalUserId } from "@/storage/auth";
+import { getSupabaseAccessToken, getSupabaseUserId } from "@/lib/supabase";
 import type { TrainingPlan } from "@/storage/trainingPlan";
 
 const SUPABASE_PLAN_ID_KEY = "pacepilot:trainingPlan:supabaseId:v1";
@@ -76,8 +76,11 @@ export async function saveTrainingPlanToSupabase(plan: TrainingPlan): Promise<vo
   const supabase = getSupabaseConfig();
   if (!supabase) return;
 
-  const userId = await getLocalUserId();
-  if (!userId) return;
+  const [userId, accessToken] = await Promise.all([
+    getSupabaseUserId(),
+    getSupabaseAccessToken(),
+  ]);
+  if (!userId || !accessToken) return;
 
   const id = (await getRemotePlanId()) ?? createUuid();
   const start = toYmd(new Date(plan.createdAt || Date.now()));
@@ -98,7 +101,7 @@ export async function saveTrainingPlanToSupabase(plan: TrainingPlan): Promise<vo
     headers: {
       "Content-Type": "application/json",
       apikey: supabase.anonKey,
-      Authorization: `Bearer ${supabase.anonKey}`,
+      Authorization: `Bearer ${accessToken}`,
       Prefer: "resolution=merge-duplicates,return=minimal",
     },
     body: JSON.stringify([payload]),
@@ -116,8 +119,11 @@ export async function pullLatestTrainingPlanFromSupabase(): Promise<TrainingPlan
   const supabase = getSupabaseConfig();
   if (!supabase) return null;
 
-  const userId = await getLocalUserId();
-  if (!userId) return null;
+  const [userId, accessToken] = await Promise.all([
+    getSupabaseUserId(),
+    getSupabaseAccessToken(),
+  ]);
+  if (!userId || !accessToken) return null;
 
   const query = new URLSearchParams({
     select: "id,user_id,sport,statut,date_debut,date_fin,semaines",
@@ -130,7 +136,7 @@ export async function pullLatestTrainingPlanFromSupabase(): Promise<TrainingPlan
     method: "GET",
     headers: {
       apikey: supabase.anonKey,
-      Authorization: `Bearer ${supabase.anonKey}`,
+      Authorization: `Bearer ${accessToken}`,
     },
   });
 

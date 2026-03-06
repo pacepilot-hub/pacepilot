@@ -157,7 +157,7 @@ export async function callHaiku(
 
 ---
 
-## 🧠 PROMPTS IA — À UTILISER DANS `constants/prompts.ts`
+## 🧠 PROMPTS IA — À UTILISER DANS `services/training/generatePlanWithAI.ts`
 
 ---
 

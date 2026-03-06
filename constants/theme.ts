@@ -72,6 +72,7 @@ export const theme = {
     /* text */
     text: base.text,
     text2: rgba(base.text, 0.72),
+    muted: rgba(base.text, 0.58),
 
     /* borders */
     border: "rgba(255,255,255,0.08)",

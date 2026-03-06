@@ -15,6 +15,7 @@ const ORS_KEY = process.env.ORS_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_TIMEOUT_MS = Number(process.env.ANTHROPIC_TIMEOUT_MS || 18000);
 
 function asNonEmptyString(x) {
   const s = String(x ?? "").trim();
@@ -54,7 +55,76 @@ function parseJsonObjectFromText(text) {
   try {
     return JSON.parse(trimmed);
   } catch {
-    return null;
+    // Continue with tolerant extraction strategies below.
+  }
+
+  // Tolerant fallback: extract first JSON object/array from mixed text.
+  const firstBrace = trimmed.search(/[\[{]/);
+  if (firstBrace < 0) return null;
+
+  const startChar = trimmed[firstBrace];
+  const endChar = startChar === "[" ? "]" : "}";
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = firstBrace; i < trimmed.length; i += 1) {
+    const ch = trimmed[i];
+
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (ch === startChar) depth += 1;
+    if (ch === endChar) {
+      depth -= 1;
+      if (depth === 0) {
+        const candidate = trimmed.slice(firstBrace, i + 1);
+        try {
+          return JSON.parse(candidate);
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+async function callAnthropicJson(payload, timeoutMs = ANTHROPIC_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), Math.max(3000, timeoutMs));
+
+  try {
+    const upstream = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+
+    const upstreamJson = await safeJson(upstream);
+    return { upstream, upstreamJson };
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -108,22 +178,26 @@ app.post("/ai/plan", async (req, res) => {
       });
     }
 
-    const upstream = await fetch(ANTHROPIC_URL, {
-      method: "POST",
-      headers: {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
+    let upstream;
+    let upstreamJson;
+    try {
+      const result = await callAnthropicJson({
         model: ANTHROPIC_MODEL,
         max_tokens,
         system,
         messages: [{ role: "user", content: userMessage }],
-      }),
-    });
-
-    const upstreamJson = await safeJson(upstream);
+      });
+      upstream = result.upstream;
+      upstreamJson = result.upstreamJson;
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        return res.status(504).json({
+          ok: false,
+          error: `Anthropic timeout after ${Math.max(3000, ANTHROPIC_TIMEOUT_MS)}ms`,
+        });
+      }
+      throw err;
+    }
 
     if (!upstream.ok) {
       return res.status(upstream.status).json({

@@ -72,18 +72,18 @@ function mergeOnboardingDeepMinimal(
   base: Partial<Onboarding>,
   patch: Partial<Onboarding>
 ): Partial<Onboarding> {
-  const baseProfile = isObj(base.profile) ? (base.profile as Record<string, unknown>) : {};
-  const patchProfile = isObj(patch.profile) ? (patch.profile as Record<string, unknown>) : {};
+  const baseProfile = isObj(base.profile) ? (base.profile as Partial<Profile>) : {};
+  const patchProfile = isObj(patch.profile) ? (patch.profile as Partial<Profile>) : {};
 
-  const baseProgram = isObj(base.program) ? (base.program as Record<string, unknown>) : {};
-  const patchProgram = isObj(patch.program) ? (patch.program as Record<string, unknown>) : {};
+  const baseProgram = isObj(base.program) ? (base.program as Partial<Program>) : {};
+  const patchProgram = isObj(patch.program) ? (patch.program as Partial<Program>) : {};
 
   return {
     ...base,
     ...patch,
-    profile: { ...baseProfile, ...patchProfile },
-    program: { ...baseProgram, ...patchProgram },
-  };
+    profile: { ...baseProfile, ...patchProfile } as Onboarding["profile"],
+    program: { ...baseProgram, ...patchProgram } as Onboarding["program"],
+  } as Partial<Onboarding>;
 }
 
 /* ------------------------------- mutex gate -------------------------------- */

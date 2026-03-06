@@ -7,7 +7,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -21,7 +20,6 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -32,9 +30,10 @@
       "expo-font"
     ],
     "extra": {
-      "apiUrl": "http://192.168.1.18:3333",
+      "apiUrl": "https://pacepilot-production.up.railway.app",
+      "apiProdUrl": "https://pacepilot-production.up.railway.app",
       "supabaseUrl": "https://kvxnjxoadwcuahdaccpn.supabase.co",
-      "supabaseAnonKey": "eyJhbGc...",
+      "supabaseAnonKey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt2eG5qeG9hZHdjdWFoZGFjY3BuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3OTA4ODEsImV4cCI6MjA4ODM2Njg4MX0.Ne6ZGySTSQ7apOY5VkjLYt7odWDKEjP6Z9orL7yXAX8",
       "apiProdUrl": "https://pacepilot-production.up.railway.app"
     }
   }

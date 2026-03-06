@@ -3,6 +3,7 @@ import * as onboarding from "@/storage/onboarding";
 import { getWeeklyPlan, saveWeeklyPlan } from "@/storage/plans";
 import { generateWeeklyPlan } from "@/coaching/planGenerator";
 import { addDaysISO, getMondayISO, todayISO } from "@/coaching/dates";
+import { syncWeeklyPlanToSupabase, syncTrainingPlanToSupabase } from "@/lib/syncPlan";
 
 import type { WeeklyPlan, WeeklyPlanDay, WeeklyPlanDays } from "@/storage/weeklyPlan";
 
@@ -78,16 +79,16 @@ function makeTrainingFingerprint(a: TrainingFingerprintArgs) {
 /*                              Onboarding guard                              */
 /* -------------------------------------------------------------------------- */
 
-type OnboardingProgramGuard = onboarding.OnboardingSave & {
+type OnboardingProgramGuard = onboarding.Onboarding & {
   program: Required<
     Pick<
-      NonNullable<onboarding.OnboardingSave["program"]>,
+      NonNullable<onboarding.Onboarding["program"]>,
       "goal" | "level" | "sessionsPerWeek" | "trainingDays"
     >
   >;
 };
 
-function canUseProgram(ob: onboarding.OnboardingSave | null): ob is OnboardingProgramGuard {
+function canUseProgram(ob: onboarding.Onboarding | null): ob is OnboardingProgramGuard {
   const p: any = (ob as any)?.program;
   const spw = p?.sessionsPerWeek;
 
@@ -221,25 +222,26 @@ async function applyTodayAIPatchIfNeeded(plan: WeeklyPlan): Promise<WeeklyPlan> 
   const patch = sessionToWeeklyDayPatch(decision.session);
 
   // ✅ conserve l'invariant tuple [7]
-  const nextDays = [...plan.days] as unknown as WeeklyPlanDays;
+  const nextDays = plan.days.map((d, i) => {
+    if (i !== idx) return d;
+    return {
+      ...today,
+      workout: patch.workout,
+      details: patch.details,
 
-  nextDays[idx] = {
-    ...today,
-    workout: patch.workout,
-    details: patch.details,
+      // stamp / meta IA
+      aiStamp: stamp,
+      aiMode: decision.mode,
+      aiConfidence: decision.confidence,
 
-    // stamp / meta IA
-    aiStamp: stamp,
-    aiMode: decision.mode,
-    aiConfidence: decision.confidence,
+      // UI-safe
+      aiReasonsText: reasonsToText(decision.reasons),
 
-    // UI-safe
-    aiReasonsText: reasonsToText(decision.reasons),
-
-    // debug/futur
-    aiReasons: decision.reasons,
-    aiFallback: decision.fallback,
-  } as any;
+      // debug/futur
+      aiReasons: decision.reasons,
+      aiFallback: decision.fallback,
+    } as any;
+  }) as unknown as WeeklyPlanDays;
 
   const nextPlan: WeeklyPlan = { ...plan, days: nextDays };
 
@@ -289,6 +291,7 @@ export async function ensureWeeklyPlan(): Promise<WeeklyPlan | null> {
     const plan: WeeklyPlan = { ...(planBase as WeeklyPlan), fingerprint: fp };
 
     await saveWeeklyPlan(plan).catch(() => {});
+    await syncWeeklyPlanToSupabase(plan).catch(() => {});
     return await applyTodayAIPatchIfNeeded(plan);
   } catch (e) {
     console.error("[ensureWeeklyPlan]", e);
@@ -396,6 +399,7 @@ export async function ensureTrainingPlan(planWeeks = 12): Promise<TrainingPlan |
     };
 
     await TrainingPlanStorage.saveTrainingPlan(plan).catch(() => {});
+    await syncTrainingPlanToSupabase(plan).catch(() => {});
     return plan;
   } catch (e) {
     console.error("[ensureTrainingPlan]", e);

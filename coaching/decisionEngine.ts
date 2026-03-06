@@ -3,6 +3,8 @@ import type { Session, Intensity } from "@/storage/trainingPlan";
 import type { Activity, ActivityContext } from "@/storage/activities";
 import type { DerivedState, Confidence } from "@/coaching/derivedState";
 import { toISODateLocal } from "@/coaching/dates";
+import type { PacePilotScoreInput } from "@/coaching/physioScoring";
+import { computePacePilotScore } from "@/coaching/physioScoring";
 
 /**
  * Decision Engine V1.2
@@ -30,7 +32,10 @@ export type DecisionReasonCode =
   | "MISSED_SESSIONS"
   | "OVERLOAD"
   | "PLANNED_SESSION_OK"
-  | "SIMPLIFY_FOR_CONTINUITY";
+  | "SIMPLIFY_FOR_CONTINUITY"
+  | "AUTONOMIC_LOCK"
+  | "FATIGUE_SLEEP_LOCK"
+  | "MEDICAL_STOP";
 
 export type DecisionReason = {
   code: DecisionReasonCode;
@@ -61,6 +66,7 @@ export type TodayContext = ActivityContext & {
   pain?: { zone: string; level: 1 | 2 | 3 } | null;
   rpeFeeling?: number; // 0..10 (optionnel)
   weatherConstraints?: WeatherConstraints;
+  physioScoreInput?: PacePilotScoreInput | null;
 };
 
 type Options = {
@@ -322,6 +328,40 @@ function chooseMode(state: DerivedState, pain: { risky: boolean; mild: boolean }
   return "observation";
 }
 
+function applyScoreLocks(mode: DecisionMode, today?: TodayContext): {
+  mode: DecisionMode;
+  lockReasons: DecisionReason[];
+} {
+  const scoreInput = today?.physioScoreInput;
+  if (!scoreInput) return { mode, lockReasons: [] };
+
+  const score = computePacePilotScore(scoreInput);
+  const locks = score.locks;
+  const lockReasons: DecisionReason[] = [];
+
+  if (locks.medicalStop) {
+    lockReasons.push({ code: "MEDICAL_STOP", weight: 3, text: "Alerte santé: arrêt immédiat et avis médical recommandé." });
+    return { mode: "safety", lockReasons };
+  }
+
+  if (locks.lockPain) {
+    lockReasons.push({ code: "PAIN_REPORTED", weight: 3, text: "Verrou sécurité: douleur > 5/10." });
+    return { mode: "safety", lockReasons };
+  }
+
+  if (locks.lockAutonomic) {
+    lockReasons.push({ code: "AUTONOMIC_LOCK", weight: 3, text: "Verrou sécurité: HRV/FC repos défavorable, Z1 max ou repos." });
+    return { mode: "recovery", lockReasons };
+  }
+
+  if (locks.lockFatigueSleep) {
+    lockReasons.push({ code: "FATIGUE_SLEEP_LOCK", weight: 3, text: "Verrou sécurité: fatigue élevée + sommeil insuffisant." });
+    return { mode: "recovery", lockReasons };
+  }
+
+  return { mode, lockReasons };
+}
+
 /* ------------------------------ weather effects --------------------------- */
 
 function applyWeatherOnMinutes(baseMin: number, today?: TodayContext): number {
@@ -510,7 +550,10 @@ export function decideTodaySession(params: {
     reasons.push({ code: "PAIN_REPORTED", weight: 2, text: "Sensibilité/douleur légère : prudence." });
   }
 
-  const mode = chooseMode(params.state, pain, reasons);
+  const baseMode = chooseMode(params.state, pain, reasons);
+  const lockOutcome = applyScoreLocks(baseMode, params.today);
+  const mode = lockOutcome.mode;
+  if (lockOutcome.lockReasons.length) reasons.push(...lockOutcome.lockReasons);
 
   // Jour du calcul
   const todayISO = params.options?.todayISO;

@@ -23,10 +23,19 @@ import type { Goal, Level, SessionsPerWeek } from "./onboarding";
 export const SPORT_FOCUS = [
   "Course à pied",
   "Trail",
+  "Triathlon",
+  "Biathlon",
   "Vélo route",
   "VTT",
   "Randonnée",
   "Natation",
+  "Fitness",
+  "Yoga",
+  "Mobilité",
+  "CrossFit",
+  "HIIT",
+  "Calisthenics",
+  "Musculation",
 ] as const;
 
 export type SportFocus = (typeof SPORT_FOCUS)[number];
@@ -48,6 +57,15 @@ export function normalizeSportFocus(input: unknown): SportFocus | null {
 
   if (s.includes("rando") || s.includes("randonn") || s.includes("hike")) return "Randonnée";
   if (s.includes("natation") || s.includes("swim")) return "Natation";
+  if (s.includes("triathlon") || s.includes("tri")) return "Triathlon";
+  if (s.includes("biathlon") || s.includes("biathlon")) return "Biathlon";
+  if (s.includes("fitness")) return "Fitness";
+  if (s.includes("yoga")) return "Yoga";
+  if (s.includes("mobilite") || s.includes("mobilité") || s.includes("mobility")) return "Mobilité";
+  if (s.includes("crossfit") || s.includes("cross fit")) return "CrossFit";
+  if (s.includes("hiit")) return "HIIT";
+  if (s.includes("calisthenics") || s.includes("calisthenie") || s.includes("calisthénie")) return "Calisthenics";
+  if (s.includes("musculation") || s.includes("muscu") || s.includes("strength")) return "Musculation";
 
   return null;
 }

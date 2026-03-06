@@ -1,166 +1,79 @@
-// app/onboarding/program.tsx
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Animated, Easing, Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 
-import { Card, Screen, SectionTitle, ButtonPrimary } from "@/components/ui";
+import { Card, Screen, ButtonPrimary } from "@/components/ui";
+import PacepilotMark from "@/components/PacepilotMark";
 import { theme } from "@/constants/theme";
 
-import type { Goal, Level, Program, SessionsPerWeek } from "@/storage/onboarding";
+import type { Goal, Level, Program, SessionsPerWeek, Sport } from "@/storage/onboarding";
 import { loadOnboarding, saveOnboarding } from "@/storage/onboarding";
 
 import { generatePlan } from "@/services/training/generatePlan";
 import { generatePlanWithAI } from "@/services/training/generatePlanWithAI";
 import { saveTrainingPlan } from "@/storage/trainingPlan";
 
-/* -------------------------------- constants ------------------------------ */
+const DOW = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"];
 
-const LEVELS: Level[] = ["Débutant", "Intermédiaire", "Avancé"];
-const GOALS: Goal[] = ["Forme", "Perte de poids", "5 km", "10 km", "Semi-marathon", "Marathon"];
-const SESSIONS: SessionsPerWeek[] = [ 1, 2, 3, 4, 5, 6];
-
-const DOW = [
-  { idx: 0, label: "Lun" },
-  { idx: 1, label: "Mar" },
-  { idx: 2, label: "Mer" },
-  { idx: 3, label: "Jeu" },
-  { idx: 4, label: "Ven" },
-  { idx: 5, label: "Sam" },
-  { idx: 6, label: "Dim" },
-] as const;
-
-const DEFAULT_DAY = 1; // Mar
-
-/* -------------------------------- helpers -------------------------------- */
-
-function uniqSortedDays(days: number[]) {
+function uniqDays(days: number[]) {
   return Array.from(new Set(days))
-    .filter((d) => Number.isFinite(d) && d >= 0 && d <= 6)
-    .sort((a, b) => a - b);
+    .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6)
+    .sort((a, b) => a - b)
+    .slice(0, 6);
 }
 
-/**
- * Garantit:
- * - jours uniques (0..6) triés
- * - longueur exactement = targetCount
- * - conserve au max les jours existants, puis complète avec un ordre “naturel”
- */
-function ensureDaysCount(days: number[], targetCount: number) {
-  let next = uniqSortedDays(days).slice(0, targetCount);
-
-  if (next.length === 0) next = [DEFAULT_DAY];
-
-  if (next.length < targetCount) {
-    const set = new Set(next);
-    for (const d of [DEFAULT_DAY, 3, 5, 0, 2, 4, 6]) {
-      if (set.size >= targetCount) break;
-      set.add(d);
-    }
-    next = uniqSortedDays(Array.from(set)).slice(0, targetCount);
-  }
-
-  return next;
+function mapSportToGoal(sport: Sport): Goal {
+  if (sport === "Trail") return "Trail (objectif)";
+  if (sport === "Course à pied") return "10 km";
+  return "Forme";
 }
 
-function daysLabel(days: number[], count: number) {
-  return ensureDaysCount(days, count)
-    .slice(0, count)
-    .map((d) => DOW.find((x) => x.idx === d)?.label ?? "?")
-    .join(" • ");
+function toSessionsPerWeek(days: number[]): SessionsPerWeek {
+  const n = Math.max(1, Math.min(6, uniqDays(days).length || 3));
+  return n as SessionsPerWeek;
 }
 
 function calibrationSessionsCountFrom(sessionsPerWeek: SessionsPerWeek): number {
   return Math.max(3, Math.min(6, Number(sessionsPerWeek)));
 }
 
-function buildProgramPayload(input: {
-  goal: Goal;
-  level: Level;
-  sessionsPerWeek: SessionsPerWeek;
-  trainingDays: number[];
-}): Program {
+function buildProgramFromProfile(profile: any): Program {
+  const primarySport = (Array.isArray(profile?.sports) && profile.sports[0]) || "Course à pied";
+  const safeDays = uniqDays(profile?.availability?.trainingDays ?? [1, 3, 6]);
+  const sessionsPerWeek = toSessionsPerWeek(safeDays);
+
+  const level =
+    profile?.level === "Débutant" ||
+    profile?.level === "Intermédiaire" ||
+    profile?.level === "Avancé" ||
+    profile?.level === "Élite"
+      ? (profile.level as Level)
+      : "Intermédiaire";
+
   return {
-    goal: input.goal,
-    level: input.level,
-    sessionsPerWeek: input.sessionsPerWeek,
-    trainingDays: ensureDaysCount(input.trainingDays, input.sessionsPerWeek),
+    goal: mapSportToGoal(primarySport as Sport),
+    level,
+    sessionsPerWeek,
+    trainingDays: safeDays,
     allowMoveSessions: false,
     movableDays: [],
-    calibrationSessionsCount: calibrationSessionsCountFrom(input.sessionsPerWeek),
+    calibrationSessionsCount: calibrationSessionsCountFrom(sessionsPerWeek),
   };
 }
-
-/* ----------------------------- small UI pieces ---------------------------- */
-
-function Chip({
-  label,
-  active,
-  onPress,
-}: {
-  label: string;
-  active?: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      hitSlop={12}
-      style={({ pressed }) => [s.chip, active && s.chipOn, pressed && { opacity: 0.86 }]}
-    >
-      <Text style={[s.chipTxt, active && s.chipTxtOn]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function DayPill({
-  label,
-  active,
-  onPress,
-  disabled,
-}: {
-  label: string;
-  active?: boolean;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      hitSlop={12}
-      disabled={disabled}
-      style={({ pressed }) => [
-        s.day,
-        active && s.dayOn,
-        disabled && { opacity: 0.55 },
-        pressed && !disabled && { opacity: 0.86 },
-      ]}
-    >
-      <Text style={[s.dayTxt, active && s.dayTxtOn]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-/* -------------------------------- component ------------------------------ */
 
 export default memo(function ProgramSetup() {
   const router = useRouter();
 
   const aliveRef = useRef(true);
   const savingRef = useRef(false);
-  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const spin = useRef(new Animated.Value(0)).current;
 
   const [loading, setLoading] = useState(true);
-
-  const [level, setLevel] = useState<Level>("Intermédiaire");
-  const [goal, setGoal] = useState<Goal>("10 km");
-  const [sessionsPerWeek, setSessionsPerWeek] = useState<SessionsPerWeek>(3);
-  const [trainingDays, setTrainingDays] = useState<number[]>([1, 3, 6]); // Mar/Jeu/Dim
-
   const [saving, setSaving] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [generationMsg, setGenerationMsg] = useState<string | null>(null);
 
-  /* -------------------------- hydrate from storage ------------------------- */
+  const [profile, setProfile] = useState<any>(null);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -169,134 +82,48 @@ export default memo(function ProgramSetup() {
       try {
         const data = await loadOnboarding().catch(() => null);
         if (!aliveRef.current) return;
-
-        const p: any = data?.program ?? {};
-
-        if (p?.goal) setGoal(p.goal);
-        if (p?.level) setLevel(p.level);
-        if (p?.sessionsPerWeek) setSessionsPerWeek(p.sessionsPerWeek);
-
-        const days = Array.isArray(p?.trainingDays) ? uniqSortedDays(p.trainingDays) : null;
-        if (days?.length) setTrainingDays(days);
+        setProfile(data?.profile ?? null);
       } finally {
-        if (!aliveRef.current) return;
-        setLoading(false);
+        if (aliveRef.current) setLoading(false);
       }
     })();
 
     return () => {
       aliveRef.current = false;
-      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
-      draftTimerRef.current = null;
     };
   }, []);
 
-  /* ----------------------------- coherence rules --------------------------- */
-
-  // Quand sessions change, on ajuste automatiquement la liste des jours.
   useEffect(() => {
-    setTrainingDays((prev) => ensureDaysCount(prev, sessionsPerWeek));
-  }, [sessionsPerWeek]);
+    if (!saving) {
+      spin.stopAnimation();
+      spin.setValue(0);
+      return;
+    }
 
-  /* --------------------------- autosave (draft) ---------------------------- */
+    const loop = Animated.loop(
+      Animated.timing(spin, {
+        toValue: 1,
+        duration: 1200,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [saving, spin]);
 
-  const scheduleDraftSave = useCallback(
-    (next: { goal?: Goal; level?: Level; sessionsPerWeek?: SessionsPerWeek; trainingDays?: number[] }) => {
-      if (loading) return;
+  const summary = useMemo(() => {
+    const p = profile ?? {};
+    const sport = Array.isArray(p?.sports) && p.sports[0] ? p.sports[0] : "Course à pied";
+    const level = p?.level ?? "Intermédiaire";
+    const days = uniqDays(p?.availability?.trainingDays ?? [1, 3, 6]).map((d) => DOW[d]).join(" • ");
+    const duration = Number(p?.availability?.sessionDurationMin) || 60;
 
-      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
-
-      draftTimerRef.current = setTimeout(() => {
-        const programPayload = buildProgramPayload({
-          goal: next.goal ?? goal,
-          level: next.level ?? level,
-          sessionsPerWeek: next.sessionsPerWeek ?? sessionsPerWeek,
-          trainingDays: next.trainingDays ?? trainingDays,
-        });
-
-        saveOnboarding({
-          program: programPayload,
-        }).catch(() => {});
-      }, 300);
-    },
-    [loading, goal, level, sessionsPerWeek, trainingDays]
-  );
-
-  /* ----------------------------- derived texts ----------------------------- */
-
-  const safeDays = useMemo(
-    () => ensureDaysCount(trainingDays, sessionsPerWeek),
-    [trainingDays, sessionsPerWeek]
-  );
-
-  const hintText = useMemo(
-    () => `Choisis ${sessionsPerWeek} jour(s) d’entraînement.`,
-    [sessionsPerWeek]
-  );
-
-  const summaryText = useMemo(() => {
-    return `${goal} • ${level} • ${sessionsPerWeek}/sem • ${daysLabel(safeDays, sessionsPerWeek)}`;
-  }, [goal, level, sessionsPerWeek, safeDays]);
-
-  /* ----------------------------- interactions ------------------------------ */
-
-  const toggleDay = useCallback(
-    (idx: number) => {
-      setErrMsg(null);
-
-      setTrainingDays((prev) => {
-        const set = new Set(prev);
-        const isOn = set.has(idx);
-
-        // Si l'utilisateur enlève un jour et que ça ferait < sessionsPerWeek,
-        // on autorise quand même (et on auto-complète). C’est plus “fluide”.
-        if (isOn) set.delete(idx);
-        else set.add(idx);
-
-        const next = ensureDaysCount(Array.from(set), sessionsPerWeek);
-        scheduleDraftSave({ trainingDays: next });
-        return next;
-      });
-    },
-    [sessionsPerWeek, scheduleDraftSave]
-  );
-
-  const onPickGoal = useCallback(
-    (g: Goal) => {
-      setErrMsg(null);
-      setGoal(g);
-      scheduleDraftSave({ goal: g });
-    },
-    [scheduleDraftSave]
-  );
-
-  const onPickLevel = useCallback(
-    (l: Level) => {
-      setErrMsg(null);
-      setLevel(l);
-      scheduleDraftSave({ level: l });
-    },
-    [scheduleDraftSave]
-  );
-
-  const onPickSessions = useCallback(
-    (n: SessionsPerWeek) => {
-      setErrMsg(null);
-      setSessionsPerWeek(n);
-
-      // trainingDays va être recalculé par useEffect, mais on “pré-sauve” aussi
-      // pour éviter d’avoir un état transitoire incohérent.
-      const nextDays = ensureDaysCount(trainingDays, n);
-      setTrainingDays(nextDays);
-      scheduleDraftSave({ sessionsPerWeek: n, trainingDays: nextDays });
-    },
-    [scheduleDraftSave, trainingDays]
-  );
-
-  /* -------------------------------- actions ------------------------------- */
+    return `${sport} • ${level} • ${days} • ${duration} min/séance`;
+  }, [profile]);
 
   const onContinue = useCallback(async () => {
-    if (savingRef.current) return;
+    if (savingRef.current || loading) return;
 
     savingRef.current = true;
     setSaving(true);
@@ -304,29 +131,16 @@ export default memo(function ProgramSetup() {
     setGenerationMsg(null);
 
     try {
-      // flush draft timer
-      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
-      draftTimerRef.current = null;
+      const data = await loadOnboarding().catch(() => null);
+      const profilePayload = (data?.profile ?? profile ?? {}) as any;
 
-      const normalizedDays = ensureDaysCount(trainingDays, sessionsPerWeek);
-      const programPayload = buildProgramPayload({
-        goal,
-        level,
-        sessionsPerWeek,
-        trainingDays: normalizedDays,
-      });
+      const programPayload = buildProgramFromProfile(profilePayload);
 
-      // 1) sauver program
       await saveOnboarding({
         program: programPayload,
       });
 
-      // 2) recharger onboarding (profil partiel ok)
-      const data = await loadOnboarding().catch(() => null);
-
-      // 3) générer plan
       let plan = null as Awaited<ReturnType<typeof generatePlanWithAI>> | null;
-      const profilePayload = (data?.profile ?? {}) as any;
 
       try {
         setGenerationMsg("Génération IA en cours…");
@@ -337,24 +151,19 @@ export default memo(function ProgramSetup() {
         plan = generatePlan(profilePayload, programPayload);
       }
 
-      // 4) sauver plan
       await saveTrainingPlan(plan);
-
-      // 5) fin onboarding
       router.replace("/onboarding/done");
     } catch (e: any) {
       const msg = String(e?.message ?? e ?? "Erreur inconnue");
       console.log("program onboarding error:", msg);
-      setErrMsg("On n’a pas pu finaliser le programme. Réessaie.");
+      setErrMsg("On n'a pas pu finaliser le programme. Réessaie.");
     } finally {
       if (!aliveRef.current) return;
       setSaving(false);
       setGenerationMsg(null);
       savingRef.current = false;
     }
-  }, [goal, level, sessionsPerWeek, trainingDays, router]);
-
-  /* ---------------------------------- UI ---------------------------------- */
+  }, [loading, profile, router]);
 
   if (loading) {
     return (
@@ -370,78 +179,51 @@ export default memo(function ProgramSetup() {
   return (
     <Screen>
       <View style={s.wrap}>
-        <Text style={s.h1}>Ton programme</Text>
-        <Text style={s.p}>On construit un plan simple, clair et cohérent.</Text>
+        <Text style={s.h1}>Ton plan est prêt à être généré</Text>
+        <Text style={s.p}>Tu as configuré ton avatar sportif. On lance la génération IA.</Text>
 
         <Card style={{ marginTop: 14 }}>
-          <Text style={s.summary}>{summaryText}</Text>
-
-          <SectionTitle>Niveau</SectionTitle>
-          <View style={s.chips}>
-            {LEVELS.map((x) => (
-              <Chip key={x} label={x} active={x === level} onPress={() => onPickLevel(x)} />
-            ))}
-          </View>
-
-          <SectionTitle>Objectif</SectionTitle>
-          <View style={s.chips}>
-            {GOALS.map((x) => (
-              <Chip key={x} label={x} active={x === goal} onPress={() => onPickGoal(x)} />
-            ))}
-          </View>
-
-          <SectionTitle>Séances par semaine</SectionTitle>
-          <View style={s.chips}>
-            {SESSIONS.map((x) => (
-              <Chip key={x} label={`${x}`} active={x === sessionsPerWeek} onPress={() => onPickSessions(x)} />
-            ))}
-          </View>
-
-          <SectionTitle>Jours d’entraînement</SectionTitle>
-          <Text style={s.hint}>{hintText}</Text>
-
-          <View style={s.days}>
-            {DOW.map((d) => (
-              <DayPill
-                key={d.idx}
-                label={d.label}
-                active={safeDays.includes(d.idx)}
-                onPress={() => toggleDay(d.idx)}
-                disabled={saving}
-              />
-            ))}
-          </View>
+          <Text style={s.summary}>{summary}</Text>
 
           {!!errMsg && <Text style={s.err}>{errMsg}</Text>}
           {!!generationMsg && <Text style={s.hint}>{generationMsg}</Text>}
 
           <View style={{ marginTop: 14, opacity: saving ? 0.7 : 1 }}>
-            <ButtonPrimary
-              label={saving ? "Enregistrement…" : "Terminer"}
-              onPress={onContinue}
-              disabled={saving}
-            />
+            <ButtonPrimary label={saving ? "Génération…" : "Générer mon plan"} onPress={onContinue} disabled={saving} />
           </View>
 
           <Pressable
             onPress={() => router.replace("/onboarding/profile")}
             style={({ pressed }) => [{ marginTop: 10 }, pressed && { opacity: 0.86 }]}
-            hitSlop={12}
             disabled={saving}
           >
-            <Text style={s.link}>Retour</Text>
+            <Text style={s.link}>Retour avatar</Text>
           </Pressable>
+
+          {saving ? (
+            <View style={s.overlay}>
+              <Animated.View
+                style={{
+                  transform: [
+                    {
+                      rotate: spin.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] }),
+                    },
+                  ],
+                }}
+              >
+                <PacepilotMark width={120} />
+              </Animated.View>
+              <Text style={s.overlayText}>{generationMsg ?? "Génération du plan..."}</Text>
+            </View>
+          ) : null}
         </Card>
       </View>
     </Screen>
   );
 });
 
-/* --------------------------------- styles -------------------------------- */
-
 const s = StyleSheet.create({
   wrap: { padding: 16, paddingTop: 24 },
-
   h1: { fontSize: 26, fontWeight: "900", color: theme.colors.text },
   p: { marginTop: 6, fontSize: 14, fontWeight: "700", color: theme.colors.text2 },
 
@@ -457,39 +239,25 @@ const s = StyleSheet.create({
     fontWeight: "900",
   },
 
-  chips: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 10, marginBottom: 8 },
-  chip: {
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 999,
-    backgroundColor: theme.colors.surface2,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-  },
-  chipOn: { backgroundColor: "rgba(239,59,0,0.14)", borderColor: "rgba(239,59,0,0.35)" },
-  chipTxt: { color: theme.colors.text, fontWeight: "900" },
-  chipTxtOn: { color: theme.colors.primary },
-
   hint: { marginTop: 6, color: theme.colors.text2, fontWeight: "700" },
+  err: { marginTop: 10, color: theme.colors.primary, fontWeight: "900" },
+  link: { color: theme.colors.primary, fontWeight: "900" },
 
-  // plus robuste qu'un justifyContent: space-between (wrap / petits écrans)
-  days: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 10 },
-  day: {
-    width: 44,
-    height: 44,
+  overlay: {
+    position: "absolute",
+    left: 10,
+    right: 10,
+    top: 10,
+    bottom: 10,
     borderRadius: 14,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: theme.colors.surface2,
+    gap: 10,
+    backgroundColor: "rgba(11,11,12,0.92)",
     borderWidth: 1,
     borderColor: theme.colors.border,
   },
-  dayOn: { backgroundColor: theme.colors.primary, borderColor: "rgba(255,255,255,0.18)" },
-  dayTxt: { color: theme.colors.text2, fontWeight: "900" },
-  dayTxtOn: { color: "#fff" },
-
-  err: { marginTop: 10, color: theme.colors.primary, fontWeight: "900" },
-  link: { color: theme.colors.primary, fontWeight: "900" },
+  overlayText: { color: theme.colors.text, fontWeight: "900" },
 
   loadingWrap: { flex: 1, alignItems: "center", justifyContent: "center", gap: 10 },
   loadingTxt: { color: theme.colors.text2, fontWeight: "800" },

@@ -43,10 +43,19 @@ export type Sex = z.infer<typeof SexSchema>;
 export const SportSchema = z.enum([
   "Course à pied",
   "Trail",
+  "Triathlon",
+  "Biathlon",
   "Vélo route",
   "VTT",
   "Randonnée",
   "Natation",
+  "Fitness",
+  "Yoga",
+  "Mobilité",
+  "CrossFit",
+  "HIIT",
+  "Calisthenics",
+  "Musculation",
 ]);
 export type Sport = z.infer<typeof SportSchema>;
 
@@ -61,7 +70,7 @@ export const GoalSchema = z.enum([
 ]);
 export type Goal = z.infer<typeof GoalSchema>;
 
-export const LevelSchema = z.enum(["Débutant", "Intermédiaire", "Avancé"]);
+export const LevelSchema = z.enum(["Débutant", "Intermédiaire", "Avancé", "Élite"]);
 export type Level = z.infer<typeof LevelSchema>;
 
 /**
@@ -84,6 +93,9 @@ export type InjurySeverity = z.infer<typeof InjurySeveritySchema>;
 
 export const InjurySchema = z
   .object({
+    /** ex: "Tendinite", "Entorse", "Douleur" */
+    type: z.string().trim().min(2).max(60).optional(),
+
     /** ex: "Genou droit", "Tendon d'Achille" */
     zone: z.string().trim().min(2),
 
@@ -99,6 +111,49 @@ export const InjurySchema = z
   .strict();
 
 export type Injury = z.infer<typeof InjurySchema>;
+
+const AvailabilitySchema = z
+  .object({
+    trainingDays: z.array(DayOfWeekSchema).min(1).max(6),
+    sessionDurationMin: z.number().int().min(15).max(240),
+  })
+  .strict();
+
+const LocationSchema = z
+  .object({
+    lat: z.number().min(-90).max(90),
+    lng: z.number().min(-180).max(180),
+    city: z.string().trim().min(1).max(80).optional(),
+    terrain: z.enum(["Montagne", "Plaine", "Littoral"]).optional(),
+    weatherNote: z.string().trim().max(120).optional(),
+  })
+  .strict();
+
+const PhysiologySchema = z
+  .object({
+    hrMax: z.number().int().min(100).max(240).optional(),
+    hrMaxMeasured: z.boolean().optional(),
+    hrRest: z.number().int().min(25).max(120).optional(),
+    hrRestBaseline: z.number().int().min(25).max(120).optional(),
+    hrThreshold: z.number().int().min(80).max(220).optional(),
+    hrThresholdMeasured: z.boolean().optional(),
+    vo2max: z.number().min(10).max(95).optional(),
+    vo2maxMeasured: z.boolean().optional(),
+    ftpWatts: z.number().min(20).max(700).optional(),
+    ftpMeasured: z.boolean().optional(),
+    vmaKmh: z.number().min(5).max(30).optional(),
+    vmaMeasured: z.boolean().optional(),
+    oneRmSquatKg: z.number().min(10).max(500).optional(),
+    oneRmMeasured: z.boolean().optional(),
+    hrvBaselineMs: z.number().min(5).max(250).optional(),
+
+    hrDriftPct: z.number().min(0).max(40).optional(),
+    runCadenceSpm: z.number().min(100).max(220).optional(),
+    bikeCadenceRpm: z.number().min(30).max(140).optional(),
+    intensityFactor: z.number().min(0.3).max(1.8).optional(),
+    targetZoneTimePct: z.number().min(0).max(100).optional(),
+  })
+  .strict();
 
 /* --------------------------------- profile -------------------------------- */
 
@@ -116,11 +171,26 @@ export const ProfileSchema = z
     /** Niveau sportif global (peut diverger selon sport plus tard) */
     level: LevelSchema.optional(),
 
+    /** années de pratique sportive */
+    yearsPractice: z.number().int().min(0).max(70).optional(),
+
     /** Multi-sport: au moins 1 sport choisi */
     sports: z.array(SportSchema).min(1).max(6).optional(),
 
     /** Antécédents blessures */
     injuries: z.array(InjurySchema).max(20).optional(),
+
+    /** disponibilité d'entraînement */
+    availability: AvailabilitySchema.optional(),
+
+    /** matériel disponible */
+    equipment: z.array(z.string().trim().min(2).max(40)).max(20).optional(),
+
+    /** localisation détectée */
+    location: LocationSchema.optional(),
+
+    /** données physiologiques et performance (optionnelles) */
+    physiology: PhysiologySchema.optional(),
   })
   .strict()
   .transform((p) => {

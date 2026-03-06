@@ -179,7 +179,7 @@ export default function Login() {
             value={email}
             onChangeText={setEmail}
             autoCapitalize="none"
-            keyboardType="email-address"
+            autoCorrect={false}
             placeholder="toi@mail.com"
             placeholderTextColor={theme.colors.text2}
             style={s.input}

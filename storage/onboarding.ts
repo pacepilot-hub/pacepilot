@@ -219,7 +219,8 @@ export async function clearOnboarding(): Promise<void> {
  * Completeness "profil" (inscription)
  * On reste volontairement pragmatique:
  * - pour construire un coach cohérent, on veut au minimum:
- *   name, age, heightCm, weightKg, sex, level, sports >= 1
+ *   name, age, heightCm, weightKg, sex, yearsPractice, level, sports >= 1,
+ *   availability (jours + durée)
  * - blessures: optionnel (mais si présent, doit être valide via Zod déjà)
  */
 export function isProfileComplete(data: Onboarding | null | undefined): boolean {
@@ -246,10 +247,25 @@ export function isProfileComplete(data: Onboarding | null | undefined): boolean 
 
   const okLevel = typeof (p as any).level === "string" && (p as any).level.trim().length > 0;
 
+  const yearsPractice = Number((p as any).yearsPractice);
+  const okYearsPractice = Number.isFinite(yearsPractice) && yearsPractice >= 0 && yearsPractice <= 70;
+
   const sports = (p as any).sports;
   const okSports = Array.isArray(sports) && sports.length >= 1;
 
-  return okName && okAge && okH && okW && okSex && okLevel && okSports;
+  const availability = (p as any).availability;
+  const days = availability?.trainingDays;
+  const duration = Number(availability?.sessionDurationMin);
+
+  const okDays =
+    Array.isArray(days) &&
+    days.length >= 1 &&
+    days.length <= 6 &&
+    days.every((d: any) => Number.isInteger(d) && d >= 0 && d <= 6);
+
+  const okDuration = Number.isFinite(duration) && duration >= 15 && duration <= 240;
+
+  return okName && okAge && okH && okW && okSex && okYearsPractice && okLevel && okSports && okDays && okDuration;
 }
 
 /**

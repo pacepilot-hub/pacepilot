@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { getApiBaseUrl } from "@/lib/api";
+import { buildScoreInputFromAvatar, computePacePilotScore } from "@/coaching/physioScoring";
 import type { Profile, Program } from "@/storage/onboarding";
 import type { Intensity, Session, TrainingPlan, TrainingWeek } from "@/storage/trainingPlan";
 
@@ -70,12 +71,24 @@ Ne retourne rien d'autre que le JSON. Pas de texte avant, pas de texte apres.
 `;
 
 function buildPlanUserMessage(profile: Profile, program: Program): string {
+  const scoringInput = buildScoreInputFromAvatar({ profile: profile as any });
+  const scoring = computePacePilotScore(scoringInput);
+
   const profileForPrompt = {
     ...profile,
     objectif: program.goal ?? "10 km",
     niveau: program.level ?? profile.level ?? "Intermediaire",
     sessions_par_semaine: program.sessionsPerWeek ?? 3,
     jours_entrainement: Array.isArray(program.trainingDays) ? program.trainingDays : [1, 3, 6],
+    score_composite: {
+      total: scoring.total,
+      group: scoring.group,
+      categories: scoring.categories,
+      limits: scoring.limits,
+      locks: scoring.locks,
+      modifiers: scoring.modifiersApplied,
+      reasons: scoring.reasons,
+    },
   };
 
   const maybeWeeks = Number((profile as any)?.duree_semaines);
@@ -274,7 +287,7 @@ export async function generatePlanWithAI(
   const req: AIPlanRequest = {
     system: PLAN_GENERATION_SYSTEM,
     userMessage: buildPlanUserMessage(profile, program),
-    maxTokens: 4000,
+    maxTokens: 2200,
   };
 
   const controller = new AbortController();

@@ -7,8 +7,9 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as SplashScreen from "expo-splash-screen";
 import { useFonts } from "expo-font";
+import { loadTrainingPlan } from "@/storage/trainingPlan";
+import { isAuthenticated } from "@/storage/authSession";
 
-const AUTH_KEY = "pacepilot:auth:v1";
 const ONB_COMPLETE_KEY = "pacepilot:onboarding:complete:v1";
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -85,6 +86,11 @@ export default function RootLayout() {
   }, [fontsLoaded, hideSplashOnce]);
 
   useEffect(() => {
+    // Warmup du plan: si local vide, loadTrainingPlan tente la source cloud.
+    loadTrainingPlan().catch(() => null);
+  }, []);
+
+  useEffect(() => {
     let alive = true;
 
     if (!pathname) return;
@@ -102,7 +108,7 @@ export default function RootLayout() {
           authed = flagsRef.current.authed;
           onbDone = flagsRef.current.onbDone;
         } else {
-          [authed, onbDone] = await Promise.all([safeGetBool(AUTH_KEY), safeGetBool(ONB_COMPLETE_KEY)]);
+          [authed, onbDone] = await Promise.all([isAuthenticated(), safeGetBool(ONB_COMPLETE_KEY)]);
           flagsRef.current = { authed, onbDone };
         }
 

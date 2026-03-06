@@ -1,6 +1,10 @@
 // storage/trainingPlan.ts
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { STORAGE as STORAGE_KEYS } from "@/storage/constants";
+import {
+  pullLatestTrainingPlanFromSupabase,
+  saveTrainingPlanToSupabase,
+} from "@/storage/trainingPlanCloud";
 
 /**
  * ✅ TrainingPlan storage — Beta-ready
@@ -44,7 +48,7 @@ export type TrainingPlan = Readonly<{
 
 const STORAGE_PLAN = {
   version: STORAGE_KEYS.trainingPlan.currentVersion,
-  key(v = STORAGE_KEYS.trainingPlan.currentVersion) {
+  key(v: number = STORAGE_KEYS.trainingPlan.currentVersion) {
     return STORAGE_KEYS.trainingPlan.key(v);
   },
 } as const;
@@ -275,6 +279,13 @@ export async function saveTrainingPlan(plan: TrainingPlan): Promise<void> {
 
     try {
       await AsyncStorage.setItem(key, JSON.stringify(sanitized));
+
+      // sync cloud non bloquant pour l'UX offline-first
+      try {
+        await saveTrainingPlanToSupabase(sanitized);
+      } catch {
+        // noop: on garde le succès local même sans réseau/cloud
+      }
     } catch {
       throw new Error("Failed to save training plan");
     }
@@ -287,7 +298,26 @@ export async function loadTrainingPlan(): Promise<TrainingPlan | null> {
   return withGate(async () => {
     try {
       const raw = await AsyncStorage.getItem(key);
-      if (!raw) return await tryMigrateFromOlderVersions();
+      if (!raw) {
+        const migrated = await tryMigrateFromOlderVersions();
+        if (migrated) return migrated;
+
+        // si local vide, on tente hydratation cloud
+        try {
+          const cloud = await pullLatestTrainingPlanFromSupabase();
+          if (cloud) {
+            const sanitizedCloud = sanitizeTrainingPlan(cloud);
+            if (sanitizedCloud) {
+              await AsyncStorage.setItem(key, JSON.stringify(sanitizedCloud));
+              return sanitizedCloud;
+            }
+          }
+        } catch {
+          // noop
+        }
+
+        return null;
+      }
 
       const parsed = safeJsonParse(raw);
       if (!parsed) return null;

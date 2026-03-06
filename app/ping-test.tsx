@@ -1,13 +1,15 @@
 import React from "react";
 import { View, Text, Pressable } from "react-native";
 
+import { getApiBaseUrl } from "@/lib/api";
+
 export default function PingTest() {
   return (
     <View style={{ flex: 1, justifyContent: "center", alignItems: "center", gap: 12 }}>
       <Pressable
         onPress={async () => {
           try {
-            const r = await fetch("http://192.168.1.18:3333/ping");
+            const r = await fetch(`${getApiBaseUrl()}/ping`);
             const j = await r.json();
             console.log("PING OK:", j);
           } catch (e) {

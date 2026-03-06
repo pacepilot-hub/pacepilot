@@ -7,8 +7,9 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Screen, Card, ButtonPrimary } from "@/components/ui";
 import { theme } from "@/constants/theme";
 import * as onboarding from "@/storage/onboarding";
-
-const AUTH_KEY = "pacepilot:auth:v1";
+import { ensureLocalUserId } from "@/storage/auth";
+import { getSupabaseClient } from "@/lib/supabase";
+import { markLegacyAuthFlag } from "@/storage/authSession";
 
 // ⚠️ fallback si ton storage/onboarding n'a pas encore reset()
 const ONB_STORAGE_FALLBACK_KEY = "pacepilot:onboarding:v1";
@@ -22,6 +23,7 @@ export default function Signup() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   const valid = useMemo(() => isEmail(email) && password.trim().length >= 4, [email, password]);
 
@@ -29,9 +31,27 @@ export default function Signup() {
     if (!valid || loading) return;
 
     setLoading(true);
+    setErr(null);
     try {
-      // ✅ session ouverte (mock)
-      await AsyncStorage.setItem(AUTH_KEY, "1");
+      const supabase = getSupabaseClient();
+      if (!supabase) {
+        throw new Error("Supabase non configuré. Renseigne supabaseUrl/supabaseAnonKey dans app.json.");
+      }
+
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim().toLowerCase(),
+        password,
+      });
+
+      if (error) throw new Error(error.message);
+
+      // Selon config Supabase, signup peut ne pas créer de session immédiate.
+      if (!data.session) {
+        throw new Error("Compte créé. Vérifie ton email puis connecte-toi.");
+      }
+
+      await markLegacyAuthFlag(true);
+      await ensureLocalUserId();
 
       // ✅ reset onboarding pour forcer un profil propre
       const anyReset = (onboarding as any)?.resetOnboarding;
@@ -44,6 +64,8 @@ export default function Signup() {
 
       // 👉 on démarre le flow profil
       router.replace("/onboarding/profile");
+    } catch (e: any) {
+      setErr(e?.message ?? "Erreur d'inscription");
     } finally {
       setLoading(false);
     }
@@ -80,6 +102,8 @@ export default function Signup() {
             <ButtonPrimary label={loading ? "Création…" : "Créer"} onPress={onCreate} />
           </View>
 
+          {err ? <Text style={s.err}>{err}</Text> : null}
+
           <Pressable onPress={() => router.back()} style={{ marginTop: 12 }}>
             <Text style={s.link}>J’ai déjà un compte</Text>
           </Pressable>
@@ -103,4 +127,5 @@ const s = StyleSheet.create({
     fontWeight: "800",
   },
   link: { color: theme.colors.primary, fontWeight: "900" },
+  err: { marginTop: 10, color: theme.colors.primary, fontWeight: "900" },
 });

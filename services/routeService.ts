@@ -1,5 +1,7 @@
 // services/routeService.ts
 
+import { getApiBaseUrl } from "@/lib/api";
+
 export type Waypoint = { lat: number; lng: number };
 export type RoutedCoord = { latitude: number; longitude: number };
 
@@ -32,9 +34,6 @@ type FetchRoutedPathArgs = {
    */
   signal?: AbortSignal;
 };
-
-// ⚠️ IMPORTANT : en dev tu peux laisser une IP, mais en vrai -> config (env/extra)
-const FALLBACK_BACKEND_URL = "http://192.168.1.18:3333";
 
 /* --------------------------------- helpers -------------------------------- */
 
@@ -80,8 +79,8 @@ function normalizeUrl(url: string) {
 }
 
 function resolveBackendUrl(override?: string) {
-  const base = normalizeUrl(override || FALLBACK_BACKEND_URL);
-  if (!base) return normalizeUrl(FALLBACK_BACKEND_URL);
+  const base = normalizeUrl(override || getApiBaseUrl());
+  if (!base) return normalizeUrl(getApiBaseUrl());
   return base;
 }
 

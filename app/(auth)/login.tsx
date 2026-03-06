@@ -7,8 +7,9 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Screen, Card, ButtonPrimary } from "@/components/ui";
 import { theme } from "@/constants/theme";
 import * as onboarding from "@/storage/onboarding";
-
-const AUTH_KEY = "pacepilot:auth:v1";
+import { ensureLocalUserId } from "@/storage/auth";
+import { getSupabaseClient } from "@/lib/supabase";
+import { markLegacyAuthFlag } from "@/storage/authSession";
 
 /* -------------------------------- helpers -------------------------------- */
 
@@ -139,8 +140,20 @@ export default function Login() {
     setErr(null);
 
     try {
-      // ✅ session ouverte (mock)
-      await AsyncStorage.setItem(AUTH_KEY, "1");
+      const supabase = getSupabaseClient();
+      if (!supabase) {
+        throw new Error("Supabase non configuré. Renseigne supabaseUrl/supabaseAnonKey dans app.json.");
+      }
+
+      const { error } = await supabase.auth.signInWithPassword({
+        email: email.trim().toLowerCase(),
+        password,
+      });
+
+      if (error) throw new Error(error.message);
+
+      await markLegacyAuthFlag(true);
+      await ensureLocalUserId();
 
       // ✅ route selon l'état réel
       const onb = await onboarding.loadOnboarding().catch(() => null);

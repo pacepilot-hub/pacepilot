@@ -6,10 +6,11 @@ import { useRouter } from "expo-router";
 import { Card, Screen, SectionTitle, ButtonPrimary } from "@/components/ui";
 import { theme } from "@/constants/theme";
 
-import type { Goal, Level, SessionsPerWeek } from "@/storage/onboarding";
+import type { Goal, Level, Program, SessionsPerWeek } from "@/storage/onboarding";
 import { loadOnboarding, saveOnboarding } from "@/storage/onboarding";
 
 import { generatePlan } from "@/services/training/generatePlan";
+import { generatePlanWithAI } from "@/services/training/generatePlanWithAI";
 import { saveTrainingPlan } from "@/storage/trainingPlan";
 
 /* -------------------------------- constants ------------------------------ */
@@ -66,6 +67,27 @@ function daysLabel(days: number[], count: number) {
     .slice(0, count)
     .map((d) => DOW.find((x) => x.idx === d)?.label ?? "?")
     .join(" • ");
+}
+
+function calibrationSessionsCountFrom(sessionsPerWeek: SessionsPerWeek): number {
+  return Math.max(3, Math.min(6, Number(sessionsPerWeek)));
+}
+
+function buildProgramPayload(input: {
+  goal: Goal;
+  level: Level;
+  sessionsPerWeek: SessionsPerWeek;
+  trainingDays: number[];
+}): Program {
+  return {
+    goal: input.goal,
+    level: input.level,
+    sessionsPerWeek: input.sessionsPerWeek,
+    trainingDays: ensureDaysCount(input.trainingDays, input.sessionsPerWeek),
+    allowMoveSessions: false,
+    movableDays: [],
+    calibrationSessionsCount: calibrationSessionsCountFrom(input.sessionsPerWeek),
+  };
 }
 
 /* ----------------------------- small UI pieces ---------------------------- */
@@ -136,6 +158,7 @@ export default memo(function ProgramSetup() {
 
   const [saving, setSaving] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [generationMsg, setGenerationMsg] = useState<string | null>(null);
 
   /* -------------------------- hydrate from storage ------------------------- */
 
@@ -184,13 +207,15 @@ export default memo(function ProgramSetup() {
       if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
 
       draftTimerRef.current = setTimeout(() => {
+        const programPayload = buildProgramPayload({
+          goal: next.goal ?? goal,
+          level: next.level ?? level,
+          sessionsPerWeek: next.sessionsPerWeek ?? sessionsPerWeek,
+          trainingDays: next.trainingDays ?? trainingDays,
+        });
+
         saveOnboarding({
-          program: {
-            goal: next.goal ?? goal,
-            level: next.level ?? level,
-            sessionsPerWeek: next.sessionsPerWeek ?? sessionsPerWeek,
-            trainingDays: ensureDaysCount(next.trainingDays ?? trainingDays, next.sessionsPerWeek ?? sessionsPerWeek),
-          },
+          program: programPayload,
         }).catch(() => {});
       }, 300);
     },
@@ -276,6 +301,7 @@ export default memo(function ProgramSetup() {
     savingRef.current = true;
     setSaving(true);
     setErrMsg(null);
+    setGenerationMsg(null);
 
     try {
       // flush draft timer
@@ -283,27 +309,33 @@ export default memo(function ProgramSetup() {
       draftTimerRef.current = null;
 
       const normalizedDays = ensureDaysCount(trainingDays, sessionsPerWeek);
+      const programPayload = buildProgramPayload({
+        goal,
+        level,
+        sessionsPerWeek,
+        trainingDays: normalizedDays,
+      });
 
       // 1) sauver program
       await saveOnboarding({
-        program: {
-          goal,
-          level,
-          sessionsPerWeek,
-          trainingDays: normalizedDays,
-        },
+        program: programPayload,
       });
 
       // 2) recharger onboarding (profil partiel ok)
       const data = await loadOnboarding().catch(() => null);
 
       // 3) générer plan
-      const plan = generatePlan((data?.profile ?? {}) as any, {
-        goal,
-        level,
-        sessionsPerWeek,
-        trainingDays: normalizedDays,
-      } as any);
+      let plan = null as Awaited<ReturnType<typeof generatePlanWithAI>> | null;
+      const profilePayload = (data?.profile ?? {}) as any;
+
+      try {
+        setGenerationMsg("Génération IA en cours…");
+        plan = await generatePlanWithAI(profilePayload, programPayload);
+      } catch (aiError: any) {
+        console.log("ai plan generation error:", String(aiError?.message ?? aiError ?? "unknown"));
+        setGenerationMsg("IA indisponible, fallback local…");
+        plan = generatePlan(profilePayload, programPayload);
+      }
 
       // 4) sauver plan
       await saveTrainingPlan(plan);
@@ -317,6 +349,7 @@ export default memo(function ProgramSetup() {
     } finally {
       if (!aliveRef.current) return;
       setSaving(false);
+      setGenerationMsg(null);
       savingRef.current = false;
     }
   }, [goal, level, sessionsPerWeek, trainingDays, router]);
@@ -380,6 +413,7 @@ export default memo(function ProgramSetup() {
           </View>
 
           {!!errMsg && <Text style={s.err}>{errMsg}</Text>}
+          {!!generationMsg && <Text style={s.hint}>{generationMsg}</Text>}
 
           <View style={{ marginTop: 14, opacity: saving ? 0.7 : 1 }}>
             <ButtonPrimary

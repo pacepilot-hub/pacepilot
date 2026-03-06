@@ -30,6 +30,12 @@
     "plugins": [
       "expo-router",
       "expo-font"
-    ]
+    ],
+    "extra": {
+      "apiUrl": "http://192.168.1.18:3333",
+      "supabaseUrl": "https://kvxnjxoadwcuahdaccpn.supabase.co",
+      "supabaseAnonKey": "eyJhbGc...",
+      "apiProdUrl": "https://pacepilot-production.up.railway.app"
+    }
   }
 }

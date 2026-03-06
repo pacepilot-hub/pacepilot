@@ -1,0 +1,625 @@
+// storage/userProfile.ts
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+/**
+ * UserProfile storage — Beta-ready
+ * - Multi-sport
+ * - Blessures: zone + gravité + date (+ note)
+ * - Préférences: nb séances, jours, coach peut déplacer (jours autorisés)
+ * - Enveloppe versionnée + migration douce + sanitize + patch
+ */
+
+/* --------------------------------- types --------------------------------- */
+
+export type Sex = "male" | "female" | "other" | "prefer_not_to_say";
+
+export type ExperienceLevel = "beginner" | "intermediate" | "advanced";
+
+/**
+ * Sports choisis (multi-select)
+ * (aligné avec storage/types.ts SportType)
+ */
+export type Sport =
+  | "Course"
+  | "Trail"
+  | "Vélo route"
+  | "VTT"
+  | "Randonnée"
+  | "Natation"
+  | "Renfo"
+  | "Marche";
+
+export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+
+export type InjurySeverity = 1 | 2 | 3; // 1 léger, 2 moyen, 3 sérieux (simple pour bêta)
+
+export type Injury = Readonly<{
+  zone: string; // ex: "Genou droit"
+  severity: InjurySeverity;
+  date: string; // "YYYY-MM-DD"
+  note?: string;
+}>;
+
+export type CoachMovePreference = Readonly<{
+  /**
+   * Si true, le coach est autorisé à déplacer une séance
+   * (dans la fenêtre autorisée ci-dessous)
+   */
+  allowMove: boolean;
+
+  /**
+   * Jours sur lesquels le coach a le droit de déplacer une séance.
+   * Ex: ["tue","thu","sat"]
+   * Si vide => on n'autorise pas (même si allowMove=true, par prudence).
+   */
+  allowedDays?: Weekday[];
+}>;
+
+/**
+ * Profil utilisateur (source de vérité pour onboarding + coach)
+ * Remarque: "id" stable.
+ */
+export type UserProfile = {
+  id: string;
+
+  // Compte / identité
+  firstName?: string;
+  email?: string; // optionnel (si tu fais login email)
+  createdAt: number;
+  updatedAt: number;
+
+  // Données perso
+  birthYear?: number; // ou age calculé côté UI
+  heightCm?: number;
+  weightKg?: number;
+  sex?: Sex;
+
+  // Niveau / sports
+  experience: ExperienceLevel;
+  sports: Sport[]; // ✅ multi-select
+
+  // Santé / blessures
+  injuries?: Injury[]; // historique (simple)
+  // plus tard: blessures actives vs anciennes
+
+  // Préférences d'entraînement
+  sessionsPerWeek: 1 | 2 | 3 | 4 | 5 | 6;
+  preferredDays?: Weekday[]; // jours "idéaux" de séances
+  coachMove?: CoachMovePreference;
+
+  // Données utiles au plan (optionnelles bêta)
+  weeklyKmCurrent?: number; // charge actuelle (si course/trail)
+  vmaKmH?: number;
+  easyPaceMinKm?: number;
+  maxHr?: number;
+};
+
+/* ----------------------------- storage config ----------------------------- */
+
+const STORAGE = {
+  key: "pacepilot.userProfile",
+  version: 2, // ✅ bump car structure étendue
+  fullKey(v = 2) {
+    return `${this.key}.v${v}`;
+  },
+} as const;
+
+const KEY = STORAGE.fullKey(STORAGE.version);
+const SCHEMA_VERSION = 2 as const;
+
+type StoredEnvelopeV2 = {
+  schemaVersion: 2;
+  savedAt: string; // ISO
+  data: UserProfile;
+};
+
+/** legacy (ton ancien fichier) */
+type LegacyV1 = {
+  id: string;
+  firstName?: string;
+  birthYear?: number;
+  goal?: any;
+  targetDate?: string;
+  experience?: any;
+  daysPerWeek?: any;
+  preferredDays?: any;
+  weeklyKmCurrent?: number;
+  vmaKmH?: number;
+  easyPaceMinKm?: number;
+  maxHr?: number;
+};
+
+/* --------------------------------- helpers -------------------------------- */
+
+function isoNow(): string {
+  return new Date().toISOString();
+}
+
+function nowMs(): number {
+  return Date.now();
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+function safeJsonParse(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function isFiniteNumber(n: unknown): n is number {
+  return typeof n === "number" && Number.isFinite(n);
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function normStr(x: unknown): string {
+  return typeof x === "string" ? x.trim() : "";
+}
+
+function isNonEmptyString(s: unknown): s is string {
+  return typeof s === "string" && s.trim().length > 0;
+}
+
+function looksLikeISODateYYYYMMDD(s: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split("-").map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return false;
+  if (m < 1 || m > 12) return false;
+  if (d < 1 || d > 31) return false;
+  return true;
+}
+
+/* --------------------------------- enums --------------------------------- */
+
+const SPORTS: readonly Sport[] = [
+  "Course",
+  "Trail",
+  "Vélo route",
+  "VTT",
+  "Randonnée",
+  "Natation",
+  "Renfo",
+  "Marche",
+] as const;
+
+function isSport(x: unknown): x is Sport {
+  return typeof x === "string" && (SPORTS as readonly string[]).includes(x);
+}
+
+function normalizeSport(x: unknown): Sport | null {
+  const s = normStr(x);
+  if (!s) return null;
+  if (isSport(s)) return s;
+
+  const low = s.toLowerCase();
+  // compat old labels
+  if (low === "vélo" || low === "velo" || low.includes("bike")) return "Vélo route";
+  if (low.includes("vtt") || low.includes("mtb")) return "VTT";
+  if (low.includes("trail")) return "Trail";
+  if (low.includes("rando") || low.includes("hike") || low.includes("randonnée")) return "Randonnée";
+  if (low.includes("natation") || low.includes("swim")) return "Natation";
+  if (low.includes("marche") || low.includes("walk")) return "Marche";
+  if (low.includes("renfo") || low.includes("strength") || low.includes("muscu")) return "Renfo";
+  if (low.includes("course") || low.includes("run")) return "Course";
+
+  return null;
+}
+
+export const WEEKDAYS_ORDER: readonly Weekday[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+
+function isWeekday(x: unknown): x is Weekday {
+  return (WEEKDAYS_ORDER as readonly string[]).includes(String(x));
+}
+
+function uniqOrderedWeekdays(days: Weekday[]): Weekday[] {
+  const set = new Set<Weekday>();
+  for (const d of WEEKDAYS_ORDER) {
+    if (days.includes(d)) set.add(d);
+  }
+  return Array.from(set);
+}
+
+function isExperienceLevel(x: unknown): x is ExperienceLevel {
+  return x === "beginner" || x === "intermediate" || x === "advanced";
+}
+
+function isSex(x: unknown): x is Sex {
+  return x === "male" || x === "female" || x === "other" || x === "prefer_not_to_say";
+}
+
+/* --------------------------------- id ------------------------------------ */
+
+function makeId(): string {
+  const ts = Date.now().toString(36);
+  const r = Math.random().toString(36).slice(2, 8);
+  return `pp_${ts}_${r}`;
+}
+
+/* ----------------------------- defaults ----------------------------------- */
+
+function defaultPreferredDays(sessionsPerWeek: UserProfile["sessionsPerWeek"]): Weekday[] {
+  // stable, simple, pragmatique
+  const base: Weekday[] = ["tue"];
+  if (sessionsPerWeek >= 2) base.push("thu");
+  if (sessionsPerWeek >= 3) base.push("sun");
+  if (sessionsPerWeek >= 4) base.push("sat");
+  if (sessionsPerWeek >= 5) base.push("mon");
+  if (sessionsPerWeek >= 6) base.push("wed");
+  return uniqOrderedWeekdays(base).slice(0, sessionsPerWeek);
+}
+
+function defaultSports(): Sport[] {
+  return ["Course"];
+}
+
+function sanitizeInjury(x: unknown): Injury | null {
+  if (!isRecord(x)) return null;
+
+  const zone = normStr((x as any).zone);
+  const severity = (x as any).severity;
+  const date = normStr((x as any).date);
+  const noteRaw = (x as any).note;
+
+  if (!zone) return null;
+  if (severity !== 1 && severity !== 2 && severity !== 3) return null;
+  if (!date || !looksLikeISODateYYYYMMDD(date)) return null;
+
+  const note = typeof noteRaw === "string" ? noteRaw.trim() || undefined : undefined;
+
+  return { zone, severity, date, note };
+}
+
+function sanitizeCoachMove(x: unknown): CoachMovePreference | undefined {
+  if (!isRecord(x)) return undefined;
+
+  const allowMove = Boolean((x as any).allowMove);
+  const allowedRaw = (x as any).allowedDays;
+
+  const allowedDays =
+    Array.isArray(allowedRaw) ? uniqOrderedWeekdays(allowedRaw.filter(isWeekday)) : undefined;
+
+  // prudence: allowMove true mais aucun jour autorisé => on désactive
+  if (allowMove && (!allowedDays || allowedDays.length === 0)) {
+    return { allowMove: false, allowedDays: undefined };
+  }
+
+  if (!allowMove) return { allowMove: false, allowedDays: undefined };
+  return { allowMove: true, allowedDays };
+}
+
+/* ----------------------------- normalization ------------------------------ */
+
+function normalizeProfile(input: Partial<UserProfile>): UserProfile {
+  const now = nowMs();
+
+  const id = isNonEmptyString(input.id) ? input.id!.trim() : makeId();
+
+  const firstName = (() => {
+    const n = normStr(input.firstName);
+    return n ? n : undefined;
+  })();
+
+  const email = (() => {
+    const e = normStr((input as any).email);
+    // validation légère (pas bloquante)
+    if (!e) return undefined;
+    if (!e.includes("@") || e.length < 5) return undefined;
+    return e;
+  })();
+
+  const createdAt = isFiniteNumber(input.createdAt) ? Math.round(input.createdAt) : now;
+  const updatedAt = now;
+
+  const birthYear = (() => {
+    if (!isFiniteNumber(input.birthYear)) return undefined;
+    const y = Math.trunc(input.birthYear);
+    return y >= 1900 && y <= 2100 ? y : undefined;
+  })();
+
+  const heightCm = (() => {
+    if (!isFiniteNumber(input.heightCm)) return undefined;
+    const v = Math.trunc(input.heightCm);
+    return v >= 120 && v <= 230 ? v : undefined;
+  })();
+
+  const weightKg = (() => {
+    if (!isFiniteNumber(input.weightKg)) return undefined;
+    const v = Math.round(input.weightKg * 10) / 10;
+    return v >= 30 && v <= 250 ? v : undefined;
+  })();
+
+  const sex = isSex(input.sex) ? input.sex : undefined;
+
+  const experience: ExperienceLevel = isExperienceLevel(input.experience) ? input.experience : "intermediate";
+
+  const sessionsPerWeek = (() => {
+    const spw = (input.sessionsPerWeek ?? (input as any).daysPerWeek) as any; // compat legacy
+    const n = isFiniteNumber(spw) ? Math.trunc(spw) : 3;
+    const c = clamp(n, 1, 6);
+    return c as 1 | 2 | 3 | 4 | 5 | 6;
+  })();
+
+  const sports = (() => {
+    const raw = (input as any).sports;
+    const arr = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    const normed = arr.map(normalizeSport).filter(Boolean) as Sport[];
+    const uniq = Array.from(new Set(normed));
+    return uniq.length ? uniq : defaultSports();
+  })();
+
+  const preferredDays = (() => {
+    const raw = input.preferredDays;
+    if (!Array.isArray(raw)) return defaultPreferredDays(sessionsPerWeek);
+    const cleaned = uniqOrderedWeekdays(raw.filter(isWeekday));
+    return (cleaned.length ? cleaned : defaultPreferredDays(sessionsPerWeek)).slice(0, sessionsPerWeek);
+  })();
+
+  const coachMove = sanitizeCoachMove(input.coachMove);
+
+  const injuries = (() => {
+    const raw = (input as any).injuries;
+    if (!Array.isArray(raw)) return undefined;
+    const list = raw.map(sanitizeInjury).filter(Boolean) as Injury[];
+    // cap anti payloads fous
+    return list.length ? list.slice(0, 50) : undefined;
+  })();
+
+  const pos = (n?: unknown, max = 10_000) => {
+    const v = isFiniteNumber(n) ? n : typeof n === "string" ? Number(n) : NaN;
+    if (!Number.isFinite(v) || v <= 0) return undefined;
+    return clamp(v, 0.0001, max);
+  };
+
+  const weeklyKmCurrent = pos(input.weeklyKmCurrent, 400);
+  const vmaKmH = pos(input.vmaKmH, 40);
+  const easyPaceMinKm = pos(input.easyPaceMinKm, 20);
+  const maxHr = isFiniteNumber(input.maxHr) ? clamp(Math.round(input.maxHr), 80, 230) : undefined;
+
+  return {
+    id,
+    firstName,
+    email,
+    createdAt,
+    updatedAt,
+    birthYear,
+    heightCm,
+    weightKg,
+    sex,
+    experience,
+    sports,
+    injuries,
+    sessionsPerWeek,
+    preferredDays,
+    coachMove,
+    weeklyKmCurrent,
+    vmaKmH,
+    easyPaceMinKm,
+    maxHr,
+  };
+}
+
+/* ------------------------------ validation -------------------------------- */
+
+function looksLikeUserProfileV2(x: unknown): x is UserProfile {
+  if (!isRecord(x)) return false;
+  const p: any = x;
+
+  if (!isNonEmptyString(p.id)) return false;
+
+  if (p.firstName != null && typeof p.firstName !== "string") return false;
+  if (p.email != null && typeof p.email !== "string") return false;
+
+  if (p.createdAt != null && !isFiniteNumber(p.createdAt)) return false;
+  if (p.updatedAt != null && !isFiniteNumber(p.updatedAt)) return false;
+
+  if (p.birthYear != null && !isFiniteNumber(p.birthYear)) return false;
+  if (p.heightCm != null && !isFiniteNumber(p.heightCm)) return false;
+  if (p.weightKg != null && !isFiniteNumber(p.weightKg)) return false;
+  if (p.sex != null && !isSex(p.sex)) return false;
+
+  if (!isExperienceLevel(p.experience)) return false;
+
+  if (!(p.sessionsPerWeek === 1 || p.sessionsPerWeek === 2 || p.sessionsPerWeek === 3 || p.sessionsPerWeek === 4 || p.sessionsPerWeek === 5 || p.sessionsPerWeek === 6))
+    return false;
+
+  if (!Array.isArray(p.sports) || p.sports.length < 1) return false;
+  if (!p.sports.every((s: any) => normalizeSport(s))) return false;
+
+  if (p.preferredDays != null) {
+    if (!Array.isArray(p.preferredDays)) return false;
+    if (!p.preferredDays.every(isWeekday)) return false;
+  }
+
+  if (p.coachMove != null) {
+    if (!isRecord(p.coachMove)) return false;
+    if (typeof (p.coachMove as any).allowMove !== "boolean") return false;
+    const ad = (p.coachMove as any).allowedDays;
+    if (ad != null && (!Array.isArray(ad) || !ad.every(isWeekday))) return false;
+  }
+
+  if (p.injuries != null) {
+    if (!Array.isArray(p.injuries)) return false;
+    // validation légère (pas exhaustive)
+  }
+
+  const optNums = ["weeklyKmCurrent", "vmaKmH", "easyPaceMinKm", "maxHr"] as const;
+  for (const k of optNums) {
+    if (p[k] != null && !isFiniteNumber(p[k])) return false;
+  }
+
+  return true;
+}
+
+function unwrapStored(raw: unknown): UserProfile | null {
+  // enveloppe v2
+  if (isRecord(raw) && raw.schemaVersion === 2) {
+    const env = raw as Partial<StoredEnvelopeV2>;
+    if (env.data && looksLikeUserProfileV2(env.data)) return normalizeProfile(env.data);
+    return null;
+  }
+
+  // compat: enveloppe v1 (si existait)
+  if (isRecord(raw) && raw.schemaVersion === 1) {
+    const env: any = raw;
+    if (env.data && isRecord(env.data)) {
+      return normalizeProfile(migrateLegacyToV2(env.data as LegacyV1));
+    }
+    return null;
+  }
+
+  // compat: ancien format direct
+  if (isRecord(raw)) {
+    // si ça ressemble à v2, on prend direct
+    if (looksLikeUserProfileV2(raw)) return normalizeProfile(raw);
+
+    // sinon tentative migration legacy
+    return normalizeProfile(migrateLegacyToV2(raw as any));
+  }
+
+  return null;
+}
+
+/* ------------------------------ migration --------------------------------- */
+
+function migrateLegacyToV2(legacy: LegacyV1): Partial<UserProfile> {
+  // on convertit ton ancien "daysPerWeek" => sessionsPerWeek
+  const sessionsPerWeek = (() => {
+    const n = isFiniteNumber(legacy.daysPerWeek) ? Math.trunc(legacy.daysPerWeek) : 3;
+    return clamp(n, 1, 6) as 1 | 2 | 3 | 4 | 5 | 6;
+  })();
+
+  const preferredDays = Array.isArray(legacy.preferredDays)
+    ? uniqOrderedWeekdays(legacy.preferredDays.filter(isWeekday)).slice(0, sessionsPerWeek)
+    : undefined;
+
+  return {
+    id: legacy.id,
+    firstName: legacy.firstName,
+    birthYear: legacy.birthYear,
+    experience: isExperienceLevel(legacy.experience) ? legacy.experience : "intermediate",
+    sessionsPerWeek,
+    preferredDays: preferredDays ?? defaultPreferredDays(sessionsPerWeek),
+    sports: defaultSports(), // legacy n'avait pas le multi-sport
+    weeklyKmCurrent: legacy.weeklyKmCurrent,
+    vmaKmH: legacy.vmaKmH,
+    easyPaceMinKm: legacy.easyPaceMinKm,
+    maxHr: legacy.maxHr,
+  };
+}
+
+/* --------------------------------- mutex ---------------------------------- */
+
+let gate: Promise<void> | null = null;
+
+async function withGate<T>(fn: () => Promise<T>): Promise<T> {
+  while (gate) await gate;
+  let release!: () => void;
+  gate = new Promise<void>((r) => (release = r));
+  try {
+    return await fn();
+  } finally {
+    release();
+    gate = null;
+  }
+}
+
+/* ---------------------------------- API ---------------------------------- */
+
+export async function getUserProfile(): Promise<UserProfile | null> {
+  try {
+    // migration douce: si v2 absent, on tente v1
+    const raw = await AsyncStorage.getItem(KEY);
+    if (raw) {
+      const parsed = safeJsonParse(raw);
+      if (!parsed) return null;
+      return unwrapStored(parsed);
+    }
+
+    // fallback: cherche une ancienne clé si tu en avais
+    const legacyKeys = [
+      "pacepilot.userProfile.v1",
+      "pacepilot.userProfile",
+      "pacepilot.userProfile.v0",
+    ];
+    for (const k of legacyKeys) {
+      const r = await AsyncStorage.getItem(k);
+      if (!r) continue;
+      const parsed = safeJsonParse(r);
+      if (!parsed) continue;
+      const migrated = unwrapStored(parsed);
+      if (migrated) {
+        await saveUserProfile(migrated); // réécrit au format v2
+        return migrated;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveUserProfile(profile: Partial<UserProfile>): Promise<UserProfile> {
+  return withGate(async () => {
+    const normalized = normalizeProfile(profile);
+
+    const envelope: StoredEnvelopeV2 = {
+      schemaVersion: SCHEMA_VERSION,
+      savedAt: isoNow(),
+      data: normalized,
+    };
+
+    await AsyncStorage.setItem(KEY, JSON.stringify(envelope));
+    return normalized;
+  });
+}
+
+/**
+ * Patch partiel (onboarding)
+ * - lit l’existant (sinon base)
+ * - merge shallow
+ * - normalize
+ */
+export async function patchUserProfile(patch: Partial<UserProfile>): Promise<UserProfile> {
+  return withGate(async () => {
+    const existing = (await getUserProfile()) ?? null;
+
+    const draft = normalizeProfile({
+      ...(existing ?? {}),
+      ...patch,
+      id: existing?.id ?? patch.id ?? makeId(),
+      createdAt: existing?.createdAt ?? nowMs(),
+    });
+
+    return await saveUserProfile(draft);
+  });
+}
+
+export async function clearUserProfile(): Promise<void> {
+  await withGate(async () => {
+    try {
+      await AsyncStorage.removeItem(KEY);
+    } catch {
+      // noop
+    }
+  });
+}
+
+export async function hasUserProfile(): Promise<boolean> {
+  try {
+    const raw = await AsyncStorage.getItem(KEY);
+    return !!raw;
+  } catch {
+    return false;
+  }
+}
+
+export const USER_PROFILE_STORAGE_KEY = KEY;
+export const USER_PROFILE_SCHEMA_VERSION = SCHEMA_VERSION;

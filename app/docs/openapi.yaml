@@ -1,0 +1,909 @@
+openapi: 3.0.3
+info:
+  title: PacePilot API
+  version: "1.0.0"
+  description: >
+    PacePilot MVP API (Auth, Profile/Onboarding, Plans/Calendar, Workouts, Activities, Check-ins,
+    AI decisions, Scores, KPI, Weather).
+
+servers:
+  - url: https://api.pacepilot.app/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Me
+  - name: Onboarding
+  - name: Plans
+  - name: Calendar
+  - name: Workouts
+  - name: Activities
+  - name: CheckIns
+  - name: AI
+  - name: Scores
+  - name: KPI
+  - name: Weather
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PaginationLimit:
+      in: query
+      name: limit
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    PaginationCursor:
+      in: query
+      name: cursor
+      required: false
+      schema:
+        type: string
+        nullable: true
+    FromDate:
+      in: query
+      name: from
+      required: true
+      schema: { type: string, format: date }
+    ToDate:
+      in: query
+      name: to
+      required: true
+      schema: { type: string, format: date }
+    FromDateTime:
+      in: query
+      name: from
+      required: true
+      schema: { type: string, format: date-time }
+    ToDateTime:
+      in: query
+      name: to
+      required: true
+      schema: { type: string, format: date-time }
+
+  responses:
+    ErrorResponse:
+      description: Error response
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NoContent:
+      description: No content
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: "VALIDATION_ERROR" }
+        message: { type: string, example: "Invalid payload" }
+        details:
+          type: object
+          additionalProperties: true
+
+    CursorPage:
+      type: object
+      properties:
+        next_cursor: { type: string, nullable: true }
+        has_more: { type: boolean }
+
+    User:
+      type: object
+      required: [id, locale, timezone, marketing_opt_in, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email, nullable: true }
+        phone: { type: string, nullable: true }
+        locale: { type: string, example: "fr-FR" }
+        timezone: { type: string, example: "Europe/Paris" }
+        consent_version: { type: string, nullable: true }
+        marketing_opt_in: { type: boolean, default: false }
+        created_at: { type: string, format: date-time }
+
+    UserProfile:
+      type: object
+      properties:
+        first_name: { type: string, nullable: true }
+        birth_year: { type: integer, nullable: true, minimum: 1900, maximum: 2100 }
+        sex: { type: string, nullable: true, enum: [male, female, other, undisclosed] }
+        height_cm: { type: integer, nullable: true, minimum: 80, maximum: 260 }
+        weight_kg: { type: number, nullable: true, minimum: 20, maximum: 300 }
+        running_level: { type: string, nullable: true, enum: [beginner, regular, advanced] }
+        goal_type: { type: string, nullable: true, enum: [10k, half, marathon, custom] }
+        goal_date: { type: string, format: date, nullable: true }
+        goal_time_sec: { type: integer, nullable: true, minimum: 0 }
+        availability:
+          type: object
+          nullable: true
+          additionalProperties: true
+        injury_history:
+          type: object
+          nullable: true
+          additionalProperties: true
+        risk_tolerance: { type: integer, nullable: true, minimum: 0, maximum: 100 }
+
+    AuthTokens:
+      type: object
+      required: [access_token, refresh_token]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+        locale: { type: string, nullable: true }
+        timezone: { type: string, nullable: true }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+
+    MeResponse:
+      type: object
+      required: [user, profile]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        profile: { $ref: "#/components/schemas/UserProfile" }
+
+    ProfileUpdateRequest:
+      type: object
+      properties:
+        first_name: { type: string }
+        birth_year: { type: integer, minimum: 1900, maximum: 2100 }
+        sex: { type: string, enum: [male, female, other, undisclosed] }
+        height_cm: { type: integer, minimum: 80, maximum: 260 }
+        weight_kg: { type: number, minimum: 20, maximum: 300 }
+        running_level: { type: string, enum: [beginner, regular, advanced] }
+        goal_type: { type: string, enum: [10k, half, marathon, custom] }
+        goal_date: { type: string, format: date }
+        goal_time_sec: { type: integer, minimum: 0 }
+        availability: { type: object, additionalProperties: true }
+        injury_history: { type: object, additionalProperties: true }
+        risk_tolerance: { type: integer, minimum: 0, maximum: 100 }
+
+    OnboardingCompleteRequest:
+      type: object
+      required: [start_date]
+      properties:
+        start_date: { type: string, format: date }
+        goal_type: { type: string, enum: [10k, half, marathon, custom] }
+        goal_date: { type: string, format: date, nullable: true }
+        goal_time_sec: { type: integer, nullable: true, minimum: 0 }
+        availability: { type: object, additionalProperties: true, nullable: true }
+        injury_history: { type: object, additionalProperties: true, nullable: true }
+        risk_tolerance: { type: integer, minimum: 0, maximum: 100, nullable: true }
+
+    OnboardingCompleteResponse:
+      type: object
+      required: [plan_id]
+      properties:
+        plan_id: { type: string, format: uuid }
+
+    Plan:
+      type: object
+      required: [id, status, start_date, plan_version]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [active, paused, archived] }
+        start_date: { type: string, format: date }
+        goal_type: { type: string, enum: [10k, half, marathon, custom], nullable: true }
+        goal_date: { type: string, format: date, nullable: true }
+        plan_version: { type: string, example: "2026.01" }
+
+    Phase:
+      type: object
+      required: [id, phase_type, start_date, end_date]
+      properties:
+        id: { type: string, format: uuid }
+        phase_type: { type: string, enum: [base, build, specific, taper, recovery] }
+        start_date: { type: string, format: date }
+        end_date: { type: string, format: date }
+        objective: { type: string, nullable: true }
+
+    ActivePlanResponse:
+      type: object
+      required: [plan, phases]
+      properties:
+        plan: { $ref: "#/components/schemas/Plan" }
+        phases:
+          type: array
+          items: { $ref: "#/components/schemas/Phase" }
+
+    WorkoutPayload:
+      type: object
+      required: [title, function, effort_label, duration_min, blocks]
+      properties:
+        title: { type: string }
+        function: { type: string }
+        effort_label: { type: string, enum: [facile, modere, dur] }
+        duration_min: { type: integer, minimum: 1 }
+        blocks:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [type, duration_min]
+            properties:
+              type: { type: string }
+              duration_min: { type: integer, minimum: 0 }
+              cue: { type: string, nullable: true }
+        safety_note: { type: string, nullable: true }
+
+    ScheduledWorkout:
+      type: object
+      required: [id, date, title, function, status, workout_payload]
+      properties:
+        id: { type: string, format: uuid }
+        date: { type: string, format: date }
+        title: { type: string }
+        function: { type: string }
+        status: { type: string, enum: [planned, done, skipped, postponed, replaced] }
+        workout_payload: { $ref: "#/components/schemas/WorkoutPayload" }
+        decision_id: { type: string, format: uuid, nullable: true }
+
+    DailyScores:
+      type: object
+      required: [date, fitness, fatigue, load, risk, algo_version]
+      properties:
+        date: { type: string, format: date }
+        fitness: { type: integer, minimum: 0, maximum: 100 }
+        fatigue: { type: integer, minimum: 0, maximum: 100 }
+        load: { type: integer, minimum: 0, maximum: 100 }
+        risk: { type: integer, minimum: 0, maximum: 100 }
+        algo_version: { type: string }
+
+    AIDecision:
+      type: object
+      required: [id, date, decision_type, recommended_workout_payload, explanation_short, reason_codes, confidence]
+      properties:
+        id: { type: string, format: uuid }
+        date: { type: string, format: date }
+        decision_type: { type: string, enum: [maintain, lighten, move, rest_imposed, replace] }
+        target_scheduled_workout_id: { type: string, format: uuid, nullable: true }
+        recommended_workout_payload: { $ref: "#/components/schemas/WorkoutPayload" }
+        explanation_short: { type: string }
+        reason_codes:
+          type: array
+          items: { type: string }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+
+    CalendarDay:
+      type: object
+      required: [date]
+      properties:
+        date: { type: string, format: date }
+        weather:
+          type: object
+          nullable: true
+          additionalProperties: true
+        scheduled_workout:
+          allOf:
+            - $ref: "#/components/schemas/ScheduledWorkout"
+          nullable: true
+        decision:
+          allOf:
+            - $ref: "#/components/schemas/AIDecision"
+          nullable: true
+        scores:
+          allOf:
+            - $ref: "#/components/schemas/DailyScores"
+          nullable: true
+
+    WeekCalendarResponse:
+      type: object
+      required: [week_start, days]
+      properties:
+        week_start: { type: string, format: date }
+        days:
+          type: array
+          items: { $ref: "#/components/schemas/CalendarDay" }
+
+    WorkoutActionRequest:
+      type: object
+      required: [action]
+      properties:
+        action: { type: string, enum: [apply, adapt, postpone] }
+        duration_min: { type: integer, nullable: true, minimum: 1 }
+        effort_label: { type: string, enum: [facile, modere, dur], nullable: true }
+        notes: { type: string, nullable: true }
+        new_date: { type: string, format: date, nullable: true }
+
+    ActivityCreateRequest:
+      type: object
+      required: [source, started_at, duration_sec]
+      properties:
+        source: { type: string, enum: [manual, strava, apple, garmin] }
+        started_at: { type: string, format: date-time }
+        duration_sec: { type: integer, minimum: 1 }
+        distance_m: { type: integer, nullable: true, minimum: 0 }
+        avg_hr: { type: integer, nullable: true, minimum: 0 }
+        max_hr: { type: integer, nullable: true, minimum: 0 }
+        elevation_gain_m: { type: integer, nullable: true, minimum: 0 }
+        avg_pace_sec_km: { type: integer, nullable: true, minimum: 0 }
+        weather_snapshot: { type: object, nullable: true, additionalProperties: true }
+        raw: { type: object, nullable: true, additionalProperties: true }
+
+    ActivityCreateResponse:
+      type: object
+      required: [activity_id]
+      properties:
+        activity_id: { type: string, format: uuid }
+
+    Activity:
+      type: object
+      required: [id, source, started_at, duration_sec]
+      properties:
+        id: { type: string, format: uuid }
+        source: { type: string }
+        started_at: { type: string, format: date-time }
+        duration_sec: { type: integer }
+        distance_m: { type: integer, nullable: true }
+        avg_hr: { type: integer, nullable: true }
+        max_hr: { type: integer, nullable: true }
+        elevation_gain_m: { type: integer, nullable: true }
+        avg_pace_sec_km: { type: integer, nullable: true }
+
+    LinkActivityRequest:
+      type: object
+      required: [scheduled_workout_id, match_confidence]
+      properties:
+        scheduled_workout_id: { type: string, format: uuid }
+        match_confidence: { type: integer, minimum: 0, maximum: 100 }
+
+    CheckInContext:
+      type: string
+      enum: [daily, pre_workout, post_workout]
+
+    CheckInCreateRequest:
+      type: object
+      required: [context, date]
+      properties:
+        context: { $ref: "#/components/schemas/CheckInContext" }
+        date: { type: string, format: date }
+        fatigue_physical: { type: integer, minimum: 0, maximum: 10, nullable: true }
+        fatigue_mental: { type: integer, minimum: 0, maximum: 10, nullable: true }
+        sleep_quality: { type: integer, minimum: 0, maximum: 10, nullable: true }
+        motivation: { type: integer, minimum: 0, maximum: 10, nullable: true }
+        soreness: { type: integer, minimum: 0, maximum: 10, nullable: true }
+        pain_flag: { type: boolean, nullable: true }
+        pain_location: { type: string, nullable: true }
+        pain_severity: { type: integer, minimum: 0, maximum: 10, nullable: true }
+        note: { type: string, nullable: true }
+
+    DecideRequest:
+      type: object
+      required: [date]
+      properties:
+        date: { type: string, format: date }
+
+    DecideResponse:
+      type: object
+      required: [decision, scheduled_workouts_updated, scores]
+      properties:
+        decision: { $ref: "#/components/schemas/AIDecision" }
+        scheduled_workouts_updated:
+          type: array
+          items: { $ref: "#/components/schemas/ScheduledWorkout" }
+        scores: { $ref: "#/components/schemas/DailyScores" }
+
+    AIDecisionsListResponse:
+      type: object
+      required: [decisions]
+      properties:
+        decisions:
+          type: array
+          items: { $ref: "#/components/schemas/AIDecision" }
+        page: { $ref: "#/components/schemas/CursorPage" }
+
+    ScoresListResponse:
+      type: object
+      required: [scores]
+      properties:
+        scores:
+          type: array
+          items: { $ref: "#/components/schemas/DailyScores" }
+        page: { $ref: "#/components/schemas/CursorPage" }
+
+    ProgressSummaryResponse:
+      type: object
+      required: [range]
+      properties:
+        range: { type: string }
+        regularity: { type: object, additionalProperties: true }
+        recovery: { type: object, additionalProperties: true }
+        load_tolerance: { type: object, additionalProperties: true }
+        fatigue_trend: { type: object, additionalProperties: true }
+
+    KPIDailyRequest:
+      type: object
+      required: [date]
+      properties:
+        date: { type: string, format: date }
+        clarity_score: { type: integer, minimum: 1, maximum: 5, nullable: true }
+        doubt_flag: { type: boolean, nullable: true }
+        usefulness_flag: { type: boolean, nullable: true }
+        safety_score: { type: integer, minimum: 1, maximum: 5, nullable: true }
+
+    WeatherDayResponse:
+      type: object
+      required: [summary, temp_min, temp_max, precip_prob, wind_kph, alerts]
+      properties:
+        summary: { type: string }
+        temp_min: { type: number }
+        temp_max: { type: number }
+        precip_prob: { type: number }
+        wind_kph: { type: number }
+        alerts:
+          type: array
+          items: { type: string }
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      security: []
+      operationId: authRegister
+      summary: Register user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+      responses:
+        "200":
+          description: Tokens + user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tokens, user]
+                properties:
+                  tokens: { $ref: "#/components/schemas/AuthTokens" }
+                  user: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      operationId: authLogin
+      summary: Login user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Tokens + user
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tokens, user]
+                properties:
+                  tokens: { $ref: "#/components/schemas/AuthTokens" }
+                  user: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      security: []
+      operationId: authRefresh
+      summary: Refresh tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: New tokens
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthTokens" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: authLogout
+      summary: Logout (invalidate refresh token)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+
+  /me:
+    get:
+      tags: [Me]
+      operationId: meGet
+      summary: Get current user + profile
+      responses:
+        "200":
+          description: Me response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /me/profile:
+    put:
+      tags: [Me]
+      operationId: meProfileUpdate
+      summary: Update profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProfileUpdateRequest" }
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MeResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /onboarding/complete:
+    post:
+      tags: [Onboarding]
+      operationId: onboardingComplete
+      summary: Complete onboarding and create initial plan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OnboardingCompleteRequest" }
+      responses:
+        "200":
+          description: Plan created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OnboardingCompleteResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /plans/active:
+    get:
+      tags: [Plans]
+      operationId: plansGetActive
+      summary: Get active plan + phases
+      responses:
+        "200":
+          description: Active plan
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivePlanResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /calendar/week:
+    get:
+      tags: [Calendar]
+      operationId: calendarGetWeek
+      summary: Get week calendar (plan + weather + decision + scores)
+      parameters:
+        - in: query
+          name: week_start
+          required: true
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Week calendar
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WeekCalendarResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /workouts/scheduled/{id}:
+    get:
+      tags: [Workouts]
+      operationId: workoutsGetScheduled
+      summary: Get scheduled workout detail
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Scheduled workout
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduledWorkout" }
+        "404": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /workouts/scheduled/{id}/action:
+    post:
+      tags: [Workouts]
+      operationId: workoutsActionScheduled
+      summary: Apply / adapt / postpone scheduled workout
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WorkoutActionRequest" }
+      responses:
+        "200":
+          description: Updated scheduled workout
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScheduledWorkout" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "404": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /activities:
+    post:
+      tags: [Activities]
+      operationId: activitiesCreate
+      summary: Create activity (manual or imported)
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: { type: string }
+          description: Prevent duplicate activity creation on retries.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ActivityCreateRequest" }
+      responses:
+        "200":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivityCreateResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+    get:
+      tags: [Activities]
+      operationId: activitiesList
+      summary: List activities by range
+      parameters:
+        - $ref: "#/components/parameters/FromDateTime"
+        - $ref: "#/components/parameters/ToDateTime"
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationCursor"
+      responses:
+        "200":
+          description: Activities list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activities]
+                properties:
+                  activities:
+                    type: array
+                    items: { $ref: "#/components/schemas/Activity" }
+                  page: { $ref: "#/components/schemas/CursorPage" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /activities/{id}/link:
+    post:
+      tags: [Activities]
+      operationId: activitiesLinkToScheduledWorkout
+      summary: Link activity to scheduled workout
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LinkActivityRequest" }
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+        "404": { $ref: "#/components/responses/ErrorResponse" }
+
+  /checkins:
+    post:
+      tags: [CheckIns]
+      operationId: checkinsCreate
+      summary: Create check-in (daily/pre/post workout)
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CheckInCreateRequest" }
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+    get:
+      tags: [CheckIns]
+      operationId: checkinsList
+      summary: List check-ins by range
+      parameters:
+        - $ref: "#/components/parameters/FromDate"
+        - $ref: "#/components/parameters/ToDate"
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationCursor"
+      responses:
+        "200":
+          description: Check-ins list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [check_ins]
+                properties:
+                  check_ins:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  page: { $ref: "#/components/schemas/CursorPage" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /ai/decide:
+    post:
+      tags: [AI]
+      operationId: aiDecide
+      summary: Compute decision for a date (and update scheduled workout if needed)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecideRequest" }
+      responses:
+        "200":
+          description: Decision + updates + scores
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DecideResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /ai/decisions:
+    get:
+      tags: [AI]
+      operationId: aiDecisionsList
+      summary: List decisions by range
+      parameters:
+        - $ref: "#/components/parameters/FromDate"
+        - $ref: "#/components/parameters/ToDate"
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationCursor"
+      responses:
+        "200":
+          description: Decisions list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AIDecisionsListResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /scores:
+    get:
+      tags: [Scores]
+      operationId: scoresList
+      summary: List daily scores by range
+      parameters:
+        - $ref: "#/components/parameters/FromDate"
+        - $ref: "#/components/parameters/ToDate"
+        - $ref: "#/components/parameters/PaginationLimit"
+        - $ref: "#/components/parameters/PaginationCursor"
+      responses:
+        "200":
+          description: Scores list
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ScoresListResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /progress/summary:
+    get:
+      tags: [Scores]
+      operationId: progressSummary
+      summary: Progress summary (non-jargon)
+      parameters:
+        - in: query
+          name: range
+          required: false
+          schema: { type: string, default: "28d" }
+      responses:
+        "200":
+          description: Summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProgressSummaryResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /kpi/daily:
+    post:
+      tags: [KPI]
+      operationId: kpiDailySubmit
+      summary: Submit daily KPI (clarity/doubt/usefulness/safety)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KPIDailyRequest" }
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }
+
+  /weather/day:
+    get:
+      tags: [Weather]
+      operationId: weatherDay
+      summary: Weather snapshot for a day/location
+      parameters:
+        - in: query
+          name: date
+          required: true
+          schema: { type: string, format: date }
+        - in: query
+          name: lat
+          required: true
+          schema: { type: number, minimum: -90, maximum: 90 }
+        - in: query
+          name: lon
+          required: true
+          schema: { type: number, minimum: -180, maximum: 180 }
+      responses:
+        "200":
+          description: Weather day response
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WeatherDayResponse" }
+        "400": { $ref: "#/components/responses/ErrorResponse" }
+        "401": { $ref: "#/components/responses/ErrorResponse" }

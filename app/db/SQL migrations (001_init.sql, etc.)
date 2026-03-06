@@ -1,0 +1,533 @@
+-- 001_init.sql
+-- PacePilot MVP schema (PostgreSQL) — rewritten (clean + idempotent + guardrails)
+-- Goals:
+-- ✅ IA silencieuse auditables (decisions + events + inputs)
+-- ✅ Check-ins + scores + KPIs (vérité terrain)
+-- ✅ Succès / Trophées type Xbox (100+), progression + unlock events + toast
+-- ✅ Chat contextuel + notifications (push + in-app)
+-- ✅ Garde-fous DB (constraints, indexes utiles, idempotent, triggers updated_at)
+-- ✅ Extensible (sources externes, routes, imports, RLS-ready)
+
+BEGIN;
+
+-- =============================================================================
+-- EXTENSIONS
+-- =============================================================================
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- Optional (email case-insensitive). Uncomment if you want CITEXT:
+-- CREATE EXTENSION IF NOT EXISTS "citext";
+
+-- =============================================================================
+-- COMMON: updated_at trigger
+-- =============================================================================
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =============================================================================
+-- USERS & PROFILE
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS users (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  email            text UNIQUE,
+  phone            text UNIQUE,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  updated_at       timestamptz NOT NULL DEFAULT now(),
+  deleted_at       timestamptz,
+  locale           text NOT NULL DEFAULT 'fr-FR',
+  timezone         text NOT NULL DEFAULT 'Europe/Paris',
+  consent_version  text,
+  marketing_opt_in boolean NOT NULL DEFAULT false,
+
+  -- garde-fou : au moins un moyen d'identification
+  CONSTRAINT users_email_or_phone_chk CHECK (email IS NOT NULL OR phone IS NOT NULL)
+);
+
+DROP TRIGGER IF EXISTS trg_users_updated_at ON users;
+CREATE TRIGGER trg_users_updated_at
+BEFORE UPDATE ON users
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Profil "données stables"
+CREATE TABLE IF NOT EXISTS user_profile (
+  user_id         uuid PRIMARY KEY REFERENCES users(id) ON DELETE RESTRICT,
+  first_name      text,
+  birth_year      int CHECK (birth_year IS NULL OR (birth_year BETWEEN 1900 AND 2100)),
+  sex             text,
+  height_cm       int CHECK (height_cm IS NULL OR (height_cm BETWEEN 50 AND 250)),
+  weight_kg       numeric CHECK (weight_kg IS NULL OR (weight_kg BETWEEN 20 AND 300)),
+  running_level   text CHECK (running_level IS NULL OR running_level IN ('beginner','regular','advanced')) DEFAULT 'regular',
+  goal_type       text CHECK (goal_type IS NULL OR goal_type IN ('10k','half','marathon','custom')),
+  goal_date       date,
+  goal_time_sec   int CHECK (goal_time_sec IS NULL OR goal_time_sec > 0),
+  availability    jsonb,
+  injury_history  jsonb,
+  risk_tolerance  int CHECK (risk_tolerance IS NULL OR (risk_tolerance BETWEEN 0 AND 100))
+);
+
+-- Devices pour push
+CREATE TABLE IF NOT EXISTS devices (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform      text NOT NULL CHECK (platform IN ('ios','android')),
+  push_token    text,
+  last_seen_at  timestamptz,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now(),
+
+  -- évite token vide (quand présent)
+  CONSTRAINT devices_push_token_nonempty_chk CHECK (push_token IS NULL OR length(trim(push_token)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_devices_push_token ON devices(push_token);
+
+DROP TRIGGER IF EXISTS trg_devices_updated_at ON devices;
+CREATE TRIGGER trg_devices_updated_at
+BEFORE UPDATE ON devices
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =============================================================================
+-- TRAINING PLAN STRUCTURE
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS training_plans (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status        text NOT NULL CHECK (status IN ('active','paused','archived')) DEFAULT 'active',
+  start_date    date NOT NULL,
+  goal_type     text CHECK (goal_type IS NULL OR goal_type IN ('10k','half','marathon','custom')),
+  goal_date     date,
+  plan_version  text NOT NULL DEFAULT 'plan_v1',
+  notes         text,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now(),
+
+  -- garde-fou léger
+  CONSTRAINT training_plans_goal_after_start_chk CHECK (goal_date IS NULL OR goal_date >= start_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_plans_user_status ON training_plans(user_id, status);
+
+DROP TRIGGER IF EXISTS trg_training_plans_updated_at ON training_plans;
+CREATE TRIGGER trg_training_plans_updated_at
+BEFORE UPDATE ON training_plans
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS plan_phases (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  plan_id     uuid NOT NULL REFERENCES training_plans(id) ON DELETE CASCADE,
+  phase_type  text NOT NULL CHECK (phase_type IN ('base','build','specific','taper','recovery')),
+  start_date  date NOT NULL,
+  end_date    date NOT NULL,
+  objective   text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT plan_phases_dates_chk CHECK (end_date >= start_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_plan_phases_plan_id ON plan_phases(plan_id);
+CREATE INDEX IF NOT EXISTS idx_plan_phases_plan_dates ON plan_phases(plan_id, start_date, end_date);
+
+CREATE TABLE IF NOT EXISTS weekly_cycles (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  plan_id      uuid NOT NULL REFERENCES training_plans(id) ON DELETE CASCADE,
+  week_start   date NOT NULL,
+  week_index   int NOT NULL CHECK (week_index > 0),
+  target_load  int CHECK (target_load IS NULL OR (target_load BETWEEN 0 AND 100)),
+  is_deload    boolean NOT NULL DEFAULT false,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(plan_id, week_start),
+  UNIQUE(plan_id, week_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_weekly_cycles_plan_week ON weekly_cycles(plan_id, week_start);
+
+-- =============================================================================
+-- WORKOUT TEMPLATES (standardisation)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS workout_templates (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  template_key  text NOT NULL UNIQUE,
+  title         text NOT NULL,
+  function      text NOT NULL,
+  structure     jsonb NOT NULL,
+  effort_label  text NOT NULL CHECK (effort_label IN ('facile','modere','dur')),
+  duration_min  int NOT NULL CHECK (duration_min > 0),
+  version       int NOT NULL DEFAULT 1 CHECK (version > 0),
+  is_active     boolean NOT NULL DEFAULT true,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_workout_templates_active ON workout_templates(is_active);
+
+DROP TRIGGER IF EXISTS trg_workout_templates_updated_at ON workout_templates;
+CREATE TRIGGER trg_workout_templates_updated_at
+BEFORE UPDATE ON workout_templates
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =============================================================================
+-- SCHEDULED WORKOUTS
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS scheduled_workouts (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  plan_id         uuid REFERENCES training_plans(id) ON DELETE SET NULL,
+  date            date NOT NULL,
+  template_id     uuid REFERENCES workout_templates(id) ON DELETE SET NULL,
+  title           text NOT NULL,
+  function        text NOT NULL,
+  workout_payload jsonb NOT NULL,
+  status          text NOT NULL CHECK (status IN ('planned','done','skipped','postponed','replaced')) DEFAULT 'planned',
+  decision_id     uuid, -- FK ajouté après création ai_decisions
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+
+  -- MVP: 1 séance planifiée par jour / utilisateur
+  UNIQUE(user_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_workouts_user_date ON scheduled_workouts(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_scheduled_workouts_plan ON scheduled_workouts(plan_id);
+
+DROP TRIGGER IF EXISTS trg_scheduled_workouts_updated_at ON scheduled_workouts;
+CREATE TRIGGER trg_scheduled_workouts_updated_at
+BEFORE UPDATE ON scheduled_workouts
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =============================================================================
+-- ACTIVITIES + LINKS
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS activities (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  source            text NOT NULL CHECK (source IN ('manual','strava','apple','garmin')),
+  started_at        timestamptz NOT NULL,
+  duration_sec      int NOT NULL CHECK (duration_sec > 0),
+  distance_m        int CHECK (distance_m IS NULL OR distance_m >= 0),
+  avg_hr            int CHECK (avg_hr IS NULL OR (avg_hr BETWEEN 30 AND 250)),
+  max_hr            int CHECK (max_hr IS NULL OR (max_hr BETWEEN 30 AND 250)),
+  elevation_gain_m  int CHECK (elevation_gain_m IS NULL OR elevation_gain_m >= 0),
+  avg_pace_sec_km   int CHECK (avg_pace_sec_km IS NULL OR avg_pace_sec_km > 0),
+  weather_snapshot  jsonb,
+  raw               jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  updated_at        timestamptz NOT NULL DEFAULT now(),
+
+  -- garde-fou: éviter doublons évidents (même user + started_at + duration)
+  UNIQUE(user_id, started_at, duration_sec)
+);
+
+CREATE INDEX IF NOT EXISTS idx_activities_user_started ON activities(user_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_activities_user_source ON activities(user_id, source);
+
+DROP TRIGGER IF EXISTS trg_activities_updated_at ON activities;
+CREATE TRIGGER trg_activities_updated_at
+BEFORE UPDATE ON activities
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS workout_links (
+  id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  scheduled_workout_id  uuid NOT NULL REFERENCES scheduled_workouts(id) ON DELETE CASCADE,
+  activity_id           uuid NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+  match_confidence      int NOT NULL CHECK (match_confidence BETWEEN 0 AND 100),
+  created_at            timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(scheduled_workout_id),
+  UNIQUE(activity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workout_links_activity ON workout_links(activity_id);
+
+-- =============================================================================
+-- CHECK-INS (daily / pre / post)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS check_ins (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  context           text NOT NULL CHECK (context IN ('daily','pre_workout','post_workout')),
+  date              date NOT NULL,
+  fatigue_physical  int CHECK (fatigue_physical IS NULL OR fatigue_physical BETWEEN 0 AND 10),
+  fatigue_mental    int CHECK (fatigue_mental IS NULL OR fatigue_mental BETWEEN 0 AND 10),
+  sleep_quality     int CHECK (sleep_quality IS NULL OR sleep_quality BETWEEN 0 AND 10),
+  motivation        int CHECK (motivation IS NULL OR motivation BETWEEN 0 AND 10),
+  soreness          int CHECK (soreness IS NULL OR soreness BETWEEN 0 AND 10),
+  pain_flag         boolean NOT NULL DEFAULT false,
+  pain_location     text,
+  pain_severity     int CHECK (pain_severity IS NULL OR pain_severity BETWEEN 0 AND 10),
+  note              text,
+  created_at        timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(user_id, context, date),
+  CONSTRAINT checkins_pain_chk CHECK (
+    (pain_flag = false AND pain_severity IS NULL AND pain_location IS NULL)
+    OR (pain_flag = true AND pain_severity IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkins_user_date ON check_ins(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_checkins_user_context_date ON check_ins(user_id, context, date);
+
+-- =============================================================================
+-- DAILY SCORES (0–100) + audit inputs
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS daily_scores (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date         date NOT NULL,
+  fitness      int NOT NULL CHECK (fitness BETWEEN 0 AND 100),
+  fatigue      int NOT NULL CHECK (fatigue BETWEEN 0 AND 100),
+  load         int NOT NULL CHECK (load BETWEEN 0 AND 100),
+  risk         int NOT NULL CHECK (risk BETWEEN 0 AND 100),
+  inputs_used  jsonb NOT NULL DEFAULT '{}'::jsonb,
+  algo_version text NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(user_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_scores_user_date ON daily_scores(user_id, date);
+
+-- KPI “truth metrics”
+CREATE TABLE IF NOT EXISTS kpi_daily (
+  user_id         uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date            date NOT NULL,
+  clarity_score   int CHECK (clarity_score IS NULL OR clarity_score BETWEEN 1 AND 5),
+  doubt_flag      boolean,
+  usefulness_flag boolean,
+  safety_score    int CHECK (safety_score IS NULL OR safety_score BETWEEN 1 AND 5),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, date)
+);
+
+-- =============================================================================
+-- AI MODELS + DECISIONS + EVENTS (audit “IA silencieuse”)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS ai_models (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  model_key  text NOT NULL,
+  version    text NOT NULL,
+  config     jsonb NOT NULL DEFAULT '{}'::jsonb,
+  is_active  boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(model_key, version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_models_active ON ai_models(is_active);
+
+CREATE TABLE IF NOT EXISTS ai_decisions (
+  id                          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id                     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  date                        date NOT NULL,
+  decision_type               text NOT NULL CHECK (decision_type IN ('maintain','lighten','move','rest_imposed','replace')),
+  target_scheduled_workout_id uuid, -- FK ajouté juste après création de scheduled_workouts
+  recommended_workout_payload jsonb NOT NULL,
+  explanation_short           text NOT NULL,
+  reason_codes                text[] NOT NULL DEFAULT ARRAY[]::text[],
+  confidence                  int NOT NULL CHECK (confidence BETWEEN 0 AND 100),
+  model_id                    uuid NOT NULL REFERENCES ai_models(id) ON DELETE RESTRICT,
+  created_at                  timestamptz NOT NULL DEFAULT now(),
+
+  -- MVP: 1 décision par jour / user
+  UNIQUE(user_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_decisions_user_date ON ai_decisions(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_ai_decisions_target_workout ON ai_decisions(target_scheduled_workout_id);
+
+-- FK target_scheduled_workout_id (après existence scheduled_workouts)
+ALTER TABLE ai_decisions
+  DROP CONSTRAINT IF EXISTS ai_decisions_target_scheduled_workout_id_fkey;
+
+ALTER TABLE ai_decisions
+  ADD CONSTRAINT ai_decisions_target_scheduled_workout_id_fkey
+  FOREIGN KEY (target_scheduled_workout_id) REFERENCES scheduled_workouts(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS ai_decision_events (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  decision_id uuid NOT NULL REFERENCES ai_decisions(id) ON DELETE CASCADE,
+  event_type  text NOT NULL CHECK (event_type IN ('applied','adapted','rejected','viewed')),
+  payload     jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_decision_events_decision ON ai_decision_events(decision_id);
+
+-- FK scheduled_workouts.decision_id maintenant que ai_decisions existe
+ALTER TABLE scheduled_workouts
+  DROP CONSTRAINT IF EXISTS scheduled_workouts_decision_id_fkey;
+
+ALTER TABLE scheduled_workouts
+  ADD CONSTRAINT scheduled_workouts_decision_id_fkey
+  FOREIGN KEY (decision_id) REFERENCES ai_decisions(id) ON DELETE SET NULL;
+
+-- =============================================================================
+-- ROUTES (parcours coach / boucles)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS routes (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id          uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name             text,
+  sport            text NOT NULL CHECK (sport IN ('running','trail','walking')),
+  source           text NOT NULL CHECK (source IN ('manual','coach','import')),
+  geometry         jsonb NOT NULL, -- geojson lineString ou autre
+  distance_m       int CHECK (distance_m IS NULL OR distance_m >= 0),
+  elevation_gain_m int CHECK (elevation_gain_m IS NULL OR elevation_gain_m >= 0),
+  tags             text[] NOT NULL DEFAULT ARRAY[]::text[],
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  updated_at       timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_routes_user_created ON routes(user_id, created_at);
+
+DROP TRIGGER IF EXISTS trg_routes_updated_at ON routes;
+CREATE TRIGGER trg_routes_updated_at
+BEFORE UPDATE ON routes
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =============================================================================
+-- TROPHIES / ACHIEVEMENTS (Xbox-style)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS achievements (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  key             text NOT NULL UNIQUE, -- ex: "first_run", "distance_100k"
+  name            text NOT NULL,
+  description     text,
+  category        text NOT NULL CHECK (category IN ('distance','dplus','streak','consistency','plans','health','special')),
+  rarity          text NOT NULL CHECK (rarity IN ('common','rare','epic','legendary')) DEFAULT 'common',
+  icon            text, -- côté app: mapping -> Ionicons
+  target_value    numeric, -- ex: 100000 (m), 5000 (m D+), 7 (jours), etc.
+  unit            text,    -- "m", "km", "days", "count"
+  is_active       boolean NOT NULL DEFAULT true,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_achievements_active ON achievements(is_active);
+CREATE INDEX IF NOT EXISTS idx_achievements_category ON achievements(category);
+
+CREATE TABLE IF NOT EXISTS user_achievements (
+  user_id           uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  achievement_id    uuid NOT NULL REFERENCES achievements(id) ON DELETE CASCADE,
+  progress_value    numeric NOT NULL DEFAULT 0,
+  progress_pct      int NOT NULL DEFAULT 0 CHECK (progress_pct BETWEEN 0 AND 100),
+  unlocked_at       timestamptz,
+  last_evaluated_at timestamptz NOT NULL DEFAULT now(),
+  meta              jsonb NOT NULL DEFAULT '{}'::jsonb,
+  PRIMARY KEY (user_id, achievement_id),
+  CONSTRAINT user_achievements_pct_consistency_chk CHECK (
+    (unlocked_at IS NULL AND progress_pct BETWEEN 0 AND 99)
+    OR (unlocked_at IS NOT NULL AND progress_pct = 100)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_achievements_user_unlocked ON user_achievements(user_id, unlocked_at);
+
+CREATE TABLE IF NOT EXISTS achievement_events (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  achievement_id  uuid NOT NULL REFERENCES achievements(id) ON DELETE CASCADE,
+  event_type      text NOT NULL CHECK (event_type IN ('unlocked','progress','viewed','shared')),
+  payload         jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_achievement_events_user_time ON achievement_events(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_achievement_events_achievement_time ON achievement_events(achievement_id, created_at);
+
+-- =============================================================================
+-- CHAT CONTEXTUEL (coach)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS chat_threads (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind        text NOT NULL CHECK (kind IN ('coach','support','system')) DEFAULT 'coach',
+  title       text,
+  context     jsonb NOT NULL DEFAULT '{}'::jsonb, -- ex: {"plan_id": "...", "day":"2026-01-28"}
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_threads_user_updated ON chat_threads(user_id, updated_at);
+
+DROP TRIGGER IF EXISTS trg_chat_threads_updated_at ON chat_threads;
+CREATE TRIGGER trg_chat_threads_updated_at
+BEFORE UPDATE ON chat_threads
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  thread_id   uuid NOT NULL REFERENCES chat_threads(id) ON DELETE CASCADE,
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role        text NOT NULL CHECK (role IN ('user','assistant','system')),
+  content     text NOT NULL,
+  meta        jsonb NOT NULL DEFAULT '{}'::jsonb, -- ex: { "sources":[], "decision_id":... }
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_time ON chat_messages(thread_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_time ON chat_messages(user_id, created_at);
+
+-- =============================================================================
+-- NOTIFICATIONS (in-app + push)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type         text NOT NULL CHECK (type IN ('coach','plan','checkin','achievement','system')),
+  title        text NOT NULL,
+  body         text,
+  deep_link    text, -- ex: "/(tabs)/progress?toast=..."
+  is_read      boolean NOT NULL DEFAULT false,
+  delivered_at timestamptz,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+
+  CONSTRAINT notifications_title_nonempty_chk CHECK (length(trim(title)) > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, is_read, created_at);
+
+-- =============================================================================
+-- IMPORT JOBS (Strava/Garmin/Apple)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS import_jobs (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  source      text NOT NULL CHECK (source IN ('strava','garmin','apple')),
+  status      text NOT NULL CHECK (status IN ('queued','running','success','failed')) DEFAULT 'queued',
+  cursor      text,
+  stats       jsonb NOT NULL DEFAULT '{}'::jsonb,
+  error       text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_jobs_user_time ON import_jobs(user_id, created_at);
+
+DROP TRIGGER IF EXISTS trg_import_jobs_updated_at ON import_jobs;
+CREATE TRIGGER trg_import_jobs_updated_at
+BEFORE UPDATE ON import_jobs
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- =============================================================================
+-- RLS-READY (optional — enable later)
+-- =============================================================================
+-- If you use Supabase / RLS, you can enable like this later (example):
+-- ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+-- ALTER TABLE training_plans ENABLE ROW LEVEL SECURITY;
+-- ... then add policies.
+
+COMMIT;

@@ -11,7 +11,7 @@
     "useLegacyStacker": false,
     "ipv6EgressEnabled": false,
     "multiRegionConfig": {
-      "us-east4-eqdc4a": {
+      "europe-west4-drams3a": {
         "numReplicas": 1
       }
     },

@@ -5,6 +5,7 @@
   },
   "deploy": {
     "runtime": "V2",
+    "startCommand": "node server.js",
     "numReplicas": 1,
     "sleepApplication": false,
     "useLegacyStacker": false,
